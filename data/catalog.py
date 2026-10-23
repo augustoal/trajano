@@ -72,13 +72,13 @@ def _sellers() -> list[SellerSpec]:
         SellerSpec("Midwest Fastener Supply", "midwest-fastener.example", "Midwest Fastener Store",
                    "US-IL", Decimal("1.00"), 3, True),
         SellerSpec("Pacific Bolt Co", "pacific-bolt.example", "Pacific Bolt Store",
-                   "US-CA", Decimal("1.08"), 2, False),
+                   "US-CA", Decimal("1.06"), 2, False),
         SellerSpec("Gulf Industrial", "gulf-industrial.example", "Gulf Industrial Fasteners",
-                   "US-TX", Decimal("0.94"), 6, True),
+                   "US-TX", Decimal("0.97"), 6, True),
         SellerSpec("Atlantic Hardware", "atlantic-hardware.example", "Atlantic Hardware Bolts",
-                   "US-NJ", Decimal("1.03"), 4, False),
+                   "US-NJ", Decimal("1.02"), 4, False),
         SellerSpec("Peach State Fasteners", "peach-state.example", "Peach State Store",
-                   "US-GA", Decimal("0.98"), 5, True),
+                   "US-GA", Decimal("0.99"), 5, True),
     ]  # fmt: skip
 
 
