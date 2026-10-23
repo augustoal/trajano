@@ -8,6 +8,7 @@ from sqlmodel import Session
 from trajano.db import get_engine
 from trajano.domain.accounts import authenticate, record_audit, require_role
 from trajano.domain.errors import DomainError
+from trajano.domain.negotiation import record_refusal
 from trajano.models import Agent
 from trajano.schemas import ErrorCode, Role, SendResult, SendToolResult
 
@@ -82,6 +83,8 @@ def attempt[T](work: Callable[[Session], T]) -> Outcome[T]:
     error = outcome.error
     if error is not None and error.action is not None:
         record_audit(error.agent_id, error.action, error.code.value, error.detail)
+    if error is not None and error.refusal is not None:
+        record_refusal(error.refusal, error.code, error.message)
     return outcome
 
 

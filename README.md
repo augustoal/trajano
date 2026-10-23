@@ -36,7 +36,7 @@ Settings use the `TRAJANO_` prefix. The default database is `sqlite:///./trajano
 
 | Owner | Still to build |
 |---|---|
-| Augusto | `catalog.search` (beyond the missing-field check), `send` for `offer`, `accept`, and order messages, owner dashboard, pausing agents |
+| Augusto | `catalog.search` (beyond the missing-field check), `send` for `offer`, `accept`, and order messages |
 | Jorge | `agents/` decision logic and the seller YAML |
 | Mateo | `pricing.landed_cost`, `orders.*`, `mandates.*`, `data.seed.load_catalog`, `eval/` |
 
@@ -71,4 +71,6 @@ These are the calls the foundation made where the architecture left a gap. Say s
 - **Seller `get_listing`.** The architecture's seller list had no read for a listing. The seller server has `get_listing`, which returns `ListingSeller` with `price_floor` to the owning company and `FORBIDDEN` to anyone else.
 - **Lazy expiry.** Reads expire an `OFFERED` thread whose latest offer is past `expires_at` and add a system `expired` message with the key `expire-offer-{offer_id}`. An `ACCEPTED` thread whose order is still `SUBMITTED` after `order_confirm_hours` expires the same way, but that path belongs to `orders` (Mateo): it rejects the order and returns the stock in the same transaction, and `negotiation` calls it on read once it exists.
 - **Threads from a listing.** `question` and `rfq` reuse the buyer's newest thread on that listing while it is `OPEN`, `QUOTE_REQUESTED`, `OFFERED`, or `COUNTERED`, and otherwise open a new one. They refuse a listing version that is no longer current (`CONFLICT`) and the buyer's own company (`OWN_COMPANY`).
+- **Refused messages.** A `send` that fails with `SPEC_INCOMPLETE`, `ROUND_LIMIT`, `STALE_OFFER`, or `MANDATE_INVALID` on a known thread leaves a system `refused` message there. It is written after the rollback, in its own transaction, like the audit row, with the key `refused-{agent_id}-{idempotency_key}`, so a retried refusal adds one message. It does not change the state or `updated_at`.
+- **Owner page.** Any active agent of a company sees that company's pending approvals, live mandates, and agents, and can pause or restore a teammate, but not pause itself.
 - **Seller order tools.** Confirm, reject, ship, and deliver call `negotiation.send` only. The domain send path is what calls into orders, in the same transaction.

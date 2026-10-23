@@ -361,3 +361,35 @@ def test_request_quote_tool_round_trip(session, monkeypatch: pytest.MonkeyPatch)
     again = _body(asyncio.run(_call(buyer_mcp, "request_quote", arguments)))
     assert again["thread_id"] == first["thread_id"]
     assert again["message_id"] == first["message_id"]
+
+
+def test_a_refused_counter_leaves_a_message_on_the_thread(
+    session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trajano.interfaces import support
+
+    freeze_clock(NOW)
+    seller, _key, store = make_seller(session)
+    buyer, buyer_key = make_buyer(session)
+    listing = make_listing(session, store)
+    thread = make_thread(session, buyer, listing, status=ThreadStatus.OFFERED, rounds_used=1)
+    offer = make_offer(session, thread, seller, expires_at=NOW + timedelta(hours=1))
+    session.commit()
+    monkeypatch.setattr(support, "current_api_key", lambda: buyer_key)
+
+    arguments = {
+        "thread_id": thread.id,
+        "offer_id": offer.id,
+        "qty": 500,
+        "idempotency_key": "late-counter",
+    }
+    for _ in range(2):
+        body = _body(asyncio.run(_call(buyer_mcp, "counter_offer", arguments)))
+        assert body["error"]["code"] == "ROUND_LIMIT"
+
+    view = get_thread(session, buyer, thread.id or 0)
+    refused = [message for message in view.messages if message.type is MessageType.REFUSED]
+    assert len(refused) == 1
+    assert refused[0].sender_agent_id is None
+    assert refused[0].payload["code"] == "ROUND_LIMIT"
+    assert view.status is ThreadStatus.OFFERED

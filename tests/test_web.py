@@ -57,8 +57,8 @@ def test_health_and_login_gate(session) -> None:
         assert threads.status_code == 200
         assert "OPEN" in threads.text
         owner = client.get("/owner")
-        assert owner.status_code == 400
-        assert "NOT_IMPLEMENTED" in owner.text
+        assert owner.status_code == 200
+        assert buyer.name in owner.text
 
         client.post("/logout")
         again = client.get(f"/listing/{listing.id}", follow_redirects=False)
