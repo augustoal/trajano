@@ -92,9 +92,7 @@ def test_tools_reject_missing_arguments() -> None:
     assert result.isError
 
 
-def test_unimplemented_tool_returns_a_structured_error(
-    session, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_missing_order_is_a_structured_error(session, monkeypatch: pytest.MonkeyPatch) -> None:
     from trajano.interfaces import support
 
     _buyer, key = make_buyer(session)
@@ -102,7 +100,7 @@ def test_unimplemented_tool_returns_a_structured_error(
     monkeypatch.setattr(support, "current_api_key", lambda: key)
     result = asyncio.run(_call(buyer_mcp, "get_order", {"order_id": 1}))
     body = _body(result)
-    assert body["error"]["code"] == "NOT_IMPLEMENTED"
+    assert body["error"]["code"] == "NOT_FOUND"
     assert result.isError is False
 
 
