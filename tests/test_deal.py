@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -184,9 +185,12 @@ def test_offer_refusals(session) -> None:
     listing = make_listing(session, store)
     thread_id = _rfq(session, buyer, listing)
 
+    keys = itertools.count()
+
     def code(draft: OfferDraft) -> ErrorCode:
+        # A fresh key per attempt: id() of a collected draft can be reused.
         with pytest.raises(DomainError) as exc:
-            _offer(session, seller, thread_id, draft, key=f"bad-{id(draft)}")
+            _offer(session, seller, thread_id, draft, key=f"bad-{next(keys)}")
         return exc.value.code
 
     good = _draft(listing)
