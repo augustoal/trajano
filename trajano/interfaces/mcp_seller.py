@@ -99,6 +99,18 @@ def build_seller_mcp() -> FastMCP:
         return seller_call(ListingToolResult, work)
 
     @mcp.tool(
+        description=(
+            "Read one of your company's listings, including its private price_floor and stock."
+        )
+    )
+    def get_listing(listing_id: int) -> ListingToolResult:
+        def work(session: Session, agent: Agent) -> ListingToolResult:
+            listing = catalog.get_listing_for_seller(session, agent.company_id, listing_id)
+            return ListingToolResult(listing=listing)
+
+        return seller_call(ListingToolResult, work)
+
+    @mcp.tool(
         description="Threads where it is your turn. Pass the cursor of the last item you saw."
     )
     def get_inbox(since: str | None = None) -> InboxToolResult:

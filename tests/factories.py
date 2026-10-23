@@ -1,11 +1,13 @@
 import secrets
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlmodel import Session
 
+from trajano.db import utc_now
 from trajano.domain.accounts import create_agent, create_company
-from trajano.models import Agent, Listing, Store
-from trajano.schemas import Role
+from trajano.models import Agent, Listing, Message, Offer, Store, Thread
+from trajano.schemas import MessageType, Role, ThreadStatus
 
 
 def make_buyer(session: Session, name: str = "Ada") -> tuple[Agent, str]:
@@ -53,3 +55,66 @@ def make_listing(session: Session, store: Store, **overrides: object) -> Listing
     session.add(listing)
     session.flush()
     return listing
+
+
+def make_thread(
+    session: Session,
+    buyer: Agent,
+    listing: Listing,
+    *,
+    status: ThreadStatus = ThreadStatus.QUOTE_REQUESTED,
+    updated_at: datetime | None = None,
+    **overrides: object,
+) -> Thread:
+    store = session.get(Store, listing.store_id)
+    assert store is not None
+    data: dict[str, object] = {
+        "listing_id": listing.id,
+        "buyer_agent_id": buyer.id,
+        "seller_store_id": store.id,
+        "seller_company_id": store.company_id,
+        "status": status,
+        "qty": 200,
+        "ship_to": "US-CA",
+        "need_by": date(2026, 12, 1),
+        "updated_at": updated_at or utc_now(),
+    }
+    data.update(overrides)
+    thread = Thread(**data)  # type: ignore[arg-type]
+    session.add(thread)
+    session.flush()
+    return thread
+
+
+def make_offer(
+    session: Session,
+    thread: Thread,
+    seller: Agent,
+    *,
+    expires_at: datetime,
+) -> Offer:
+    message = Message(
+        thread_id=thread.id or 0,
+        sender_agent_id=seller.id,
+        type=MessageType.OFFER,
+        payload={"unit_price": "0.1200", "qty": 200},
+        idempotency_key=f"offer-{secrets.token_hex(4)}",
+    )
+    session.add(message)
+    session.flush()
+    offer = Offer(
+        thread_id=thread.id or 0,
+        message_id=message.id or 0,
+        listing_id=thread.listing_id,
+        lines=[{"kind": "goods", "description": "200 x M8", "amount": "24.00"}],
+        unit_price=Decimal("0.1200"),
+        qty=200,
+        total=Decimal("24.00"),
+        ship_to=thread.ship_to or "US-CA",
+        delivery_date=date(2026, 11, 20),
+        expires_at=expires_at,
+        hash="0" * 64,
+    )
+    session.add(offer)
+    session.flush()
+    return offer
