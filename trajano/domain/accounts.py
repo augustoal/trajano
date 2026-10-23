@@ -8,9 +8,19 @@ from sqlmodel import Session, col, select
 
 from trajano.config import get_settings
 from trajano.db import utc_now
+from trajano.domain import idempotency
 from trajano.domain.errors import DomainError
-from trajano.models import Agent, AuditEvent, Company, Message
-from trajano.schemas import ErrorCode, MessageType, OwnerView, Role
+from trajano.models import Agent, ApprovalRequest, AuditEvent, Company, Mandate, Message
+from trajano.schemas import (
+    AgentView,
+    ApprovalStatus,
+    ApprovalView,
+    ErrorCode,
+    MandateView,
+    MessageType,
+    OwnerView,
+    Role,
+)
 
 _KEY_PREFIX = "tj_"
 
@@ -137,12 +147,97 @@ def set_agent_active(
     idempotency_key: str,
 ) -> Agent:
     """Pause or restore an agent in the actor's company."""
-    raise NotImplementedError("Augusto: accounts.set_agent_active")
+    fingerprint = idempotency.request_fingerprint(
+        {"op": "set_agent_active", "agent_id": agent_id, "active": active}
+    )
+    stored = idempotency.begin(session, actor.id or 0, idempotency_key, fingerprint)
+    target = session.get(Agent, agent_id)
+    if target is None:
+        raise DomainError(ErrorCode.NOT_FOUND, f"agent {agent_id} not found")
+    if stored is not None:
+        return target
+    if target.company_id != actor.company_id:
+        raise DomainError(
+            ErrorCode.FORBIDDEN,
+            "this agent belongs to another company",
+            action="set_agent_active",
+            agent_id=actor.id,
+            detail={"target_agent_id": agent_id},
+        )
+    # A paused agent cannot sign in to restore itself.
+    if target.id == actor.id and not active:
+        raise DomainError(ErrorCode.VALIDATION, "you cannot pause yourself")
+    target.active = active
+    session.add(target)
+    session.add(
+        AuditEvent(
+            agent_id=actor.id,
+            action="set_agent_active",
+            result="ok",
+            detail={"target_agent_id": agent_id, "active": active},
+            created_at=utc_now(),
+        )
+    )
+    session.flush()
+    idempotency.complete(
+        session, actor.id or 0, idempotency_key, {"agent_id": agent_id, "active": active}
+    )
+    return target
 
 
 def owner_dashboard(session: Session, agent: Agent) -> OwnerView:
     """Pending approvals, live mandates, and agents for the caller's company."""
-    raise NotImplementedError("Augusto: accounts.owner_dashboard")
+    company_agents = session.exec(
+        select(Agent).where(Agent.company_id == agent.company_id).order_by(col(Agent.id))
+    ).all()
+    approvals = session.exec(
+        select(ApprovalRequest)
+        .join(Agent, col(ApprovalRequest.agent_id) == Agent.id)
+        .where(
+            Agent.company_id == agent.company_id,
+            ApprovalRequest.status == ApprovalStatus.PENDING,
+        )
+        .order_by(col(ApprovalRequest.id))
+    ).all()
+    live = session.exec(
+        select(Mandate)
+        .where(
+            Mandate.company_id == agent.company_id,
+            col(Mandate.revoked_at).is_(None),
+            Mandate.expires_at > utc_now(),
+        )
+        .order_by(col(Mandate.id))
+    ).all()
+    return OwnerView(
+        approvals=[
+            ApprovalView(
+                id=row.id or 0,
+                offer_id=row.offer_id,
+                agent_id=row.agent_id,
+                status=row.status,
+                mandate_id=row.mandate_id,
+            )
+            for row in approvals
+        ],
+        mandates=[
+            MandateView(
+                id=row.id or 0,
+                agent_id=row.agent_id,
+                category=row.category,
+                max_unit_price=row.max_unit_price,
+                max_total=row.max_total,
+                max_qty=row.max_qty,
+                currency=row.currency,
+                expires_at=row.expires_at,
+                revoked_at=row.revoked_at,
+            )
+            for row in live
+        ],
+        agents=[
+            AgentView(id=row.id or 0, name=row.name, roles=row.roles, active=row.active)
+            for row in company_agents
+        ],
+    )
 
 
 def record_audit(

@@ -3,12 +3,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import and_, or_
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from trajano.config import get_settings
 from trajano.db import utc_now
 from trajano.domain import accounts, idempotency
-from trajano.domain.errors import DomainError
+from trajano.domain.errors import DomainError, Refusal
 from trajano.models import Agent, Listing, Message, Offer, Store, Thread
 from trajano.schemas import (
     PAYLOAD_MODELS,
@@ -20,6 +21,8 @@ from trajano.schemas import (
     MessageType,
     MessageView,
     QuestionPayload,
+    RefusalCode,
+    RefusedPayload,
     RfqPayload,
     Role,
     SendResult,
@@ -43,6 +46,8 @@ _TURN = {
 }
 
 _INBOX_PAGE = 100
+
+_REFUSALS = {code.value for code in RefusalCode}
 
 # These need pricing.landed_cost or the orders module before send can apply them.
 _WAITING = {
@@ -232,61 +237,15 @@ def send(
             detail={"thread_id": thread.id, "type": message_type.value},
         )
 
-    _expire_if_stale(session, thread)
-    if thread.status is ThreadStatus.EXPIRED and message_type is MessageType.COUNTER:
-        raise DomainError(ErrorCode.STALE_OFFER, "the offer expired")
-    if message_type is MessageType.COUNTER and thread.rounds_used >= 1:
-        raise DomainError(
-            ErrorCode.ROUND_LIMIT,
-            "only one counter is allowed; accept or withdraw the final offer",
-            action="send",
-            agent_id=agent.id,
-            detail={"thread_id": thread.id},
-        )
-    destination = transition(thread.status, message_type, role)
-
-    now = utc_now()
-    match body:
-        case QuestionPayload():
-            thread.pending_question = True
-        case RfqPayload():
-            if body.need_by < now.date():
-                raise DomainError(ErrorCode.VALIDATION, "need_by is in the past")
-            accounts.enforce_rfq_rate_limit(session, agent)
-            thread.qty = body.qty
-            thread.ship_to = body.ship_to
-            thread.need_by = body.need_by
-        case CounterPayload():
-            _check_countered_offer(session, thread, body.offer_id)
-            thread.rounds_used += 1
-    if message_type is MessageType.ANSWER:
-        if not thread.pending_question:
-            raise DomainError(ErrorCode.INVALID_TRANSITION, "no question is waiting for an answer")
-        thread.pending_question = False
-
-    message = Message(
-        thread_id=thread.id or 0,
-        sender_agent_id=agent.id,
-        type=message_type,
-        payload=body.model_dump(mode="json"),
-        text=text,
-        idempotency_key=idempotency_key,
-        created_at=now,
-    )
-    thread.status = destination
-    thread.updated_at = now
-    session.add(thread)
-    session.add(message)
-    session.flush()
-
-    result = SendResult(
-        thread_id=thread.id or 0,
-        message_id=message.id or 0,
-        status=thread.status,
-        next_actions=next_actions(thread, agent),
-    )
-    idempotency.complete(session, agent.id or 0, idempotency_key, result.model_dump(mode="json"))
-    return result
+    try:
+        return _apply(session, agent, thread, role, message_type, body, idempotency_key, text)
+    except DomainError as exc:
+        if exc.code.value in _REFUSALS:
+            exc.refusal = Refusal(
+                thread_id=thread.id or 0,
+                key=f"refused-{agent.id}-{idempotency_key}",
+            )
+        raise
 
 
 def get_inbox(
@@ -384,6 +343,97 @@ def get_thread(session: Session, agent: Agent, thread_id: int) -> ThreadView:
             for message in messages
         ],
     )
+
+
+def _apply(
+    session: Session,
+    agent: Agent,
+    thread: Thread,
+    role: Role,
+    message_type: MessageType,
+    body: BaseModel,
+    idempotency_key: str,
+    text: str | None,
+) -> SendResult:
+    _expire_if_stale(session, thread)
+    if thread.status is ThreadStatus.EXPIRED and message_type is MessageType.COUNTER:
+        raise DomainError(ErrorCode.STALE_OFFER, "the offer expired")
+    if message_type is MessageType.COUNTER and thread.rounds_used >= 1:
+        raise DomainError(
+            ErrorCode.ROUND_LIMIT,
+            "only one counter is allowed; accept or withdraw the final offer",
+            action="send",
+            agent_id=agent.id,
+            detail={"thread_id": thread.id},
+        )
+    destination = transition(thread.status, message_type, role)
+
+    now = utc_now()
+    match body:
+        case QuestionPayload():
+            thread.pending_question = True
+        case RfqPayload():
+            if body.need_by < now.date():
+                raise DomainError(ErrorCode.VALIDATION, "need_by is in the past")
+            accounts.enforce_rfq_rate_limit(session, agent)
+            thread.qty = body.qty
+            thread.ship_to = body.ship_to
+            thread.need_by = body.need_by
+        case CounterPayload():
+            _check_countered_offer(session, thread, body.offer_id)
+            thread.rounds_used += 1
+    if message_type is MessageType.ANSWER:
+        if not thread.pending_question:
+            raise DomainError(ErrorCode.INVALID_TRANSITION, "no question is waiting for an answer")
+        thread.pending_question = False
+
+    message = Message(
+        thread_id=thread.id or 0,
+        sender_agent_id=agent.id,
+        type=message_type,
+        payload=body.model_dump(mode="json"),
+        text=text,
+        idempotency_key=idempotency_key,
+        created_at=now,
+    )
+    thread.status = destination
+    thread.updated_at = now
+    session.add(thread)
+    session.add(message)
+    session.flush()
+
+    result = SendResult(
+        thread_id=thread.id or 0,
+        message_id=message.id or 0,
+        status=thread.status,
+        next_actions=next_actions(thread, agent),
+    )
+    idempotency.complete(session, agent.id or 0, idempotency_key, result.model_dump(mode="json"))
+    return result
+
+
+def record_refusal(refusal: Refusal, code: ErrorCode, message: str) -> None:
+    """Add a system refused message in its own transaction, after send rolled back."""
+    from trajano.db import get_engine
+
+    with Session(get_engine(), expire_on_commit=False) as session:
+        session.add(
+            Message(
+                thread_id=refusal.thread_id,
+                sender_agent_id=None,
+                type=MessageType.REFUSED,
+                payload=RefusedPayload(code=RefusalCode(code.value), message=message).model_dump(
+                    mode="json"
+                ),
+                idempotency_key=refusal.key,
+                created_at=utc_now(),
+            )
+        )
+        try:
+            session.commit()
+        except IntegrityError:
+            # A retried refusal already left its message.
+            session.rollback()
 
 
 def _validate(message_type: MessageType, payload: object) -> BaseModel:
