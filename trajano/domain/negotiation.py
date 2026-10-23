@@ -1,14 +1,19 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
-from sqlmodel import Session
+from sqlalchemy import and_, or_
+from sqlmodel import Session, col, select
 
+from trajano.db import utc_now
 from trajano.domain.errors import DomainError
-from trajano.models import Agent, Thread
+from trajano.models import Agent, Message, Offer, Thread
 from trajano.schemas import (
     ErrorCode,
+    ExpiredPayload,
+    InboxItem,
     InboxPage,
     MessageType,
+    MessageView,
     Role,
     SendResult,
     ThreadStatus,
@@ -29,6 +34,8 @@ _TURN = {
     MessageType.SHIPPED,
     MessageType.DELIVERED,
 }
+
+_INBOX_PAGE = 100
 
 _QUIET = (
     ThreadStatus.OPEN,
@@ -121,15 +128,11 @@ def is_my_turn(actions: list[MessageType]) -> bool:
 def encode_cursor(updated_at: datetime, thread_id: int) -> str:
     if updated_at.tzinfo is None:
         raise ValueError("updated_at must be timezone-aware")
-    from datetime import UTC
-
     stamp = updated_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     return f"{stamp}|{thread_id}"
 
 
 def decode_cursor(cursor: str) -> tuple[datetime, int]:
-    from datetime import UTC
-
     try:
         stamp, raw_id = cursor.split("|", 1)
         parsed = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=UTC)
@@ -183,9 +186,111 @@ def get_inbox(
     since is an exclusive encode_cursor. Order by (updated_at, id).
     Expire stale offers before deciding whose turn it is.
     """
-    raise NotImplementedError("Augusto: negotiation.get_inbox")
+    sides = []
+    if Role.BUYER.value in agent.roles:
+        sides.append(Thread.buyer_agent_id == agent.id)
+    if Role.SELLER.value in agent.roles:
+        sides.append(Thread.seller_company_id == agent.company_id)
+    if not sides:
+        return InboxPage(threads=[])
+
+    offered = session.exec(
+        select(Thread).where(or_(*sides), Thread.status == ThreadStatus.OFFERED)
+    ).all()
+    for thread in offered:
+        _expire_if_stale(session, thread)
+
+    query = select(Thread).where(or_(*sides))
+    if since is not None:
+        stamp, thread_id = decode_cursor(since)
+        query = query.where(
+            or_(
+                Thread.updated_at > stamp,
+                and_(Thread.updated_at == stamp, col(Thread.id) > thread_id),
+            )
+        )
+    query = query.order_by(col(Thread.updated_at), col(Thread.id))
+
+    items = []
+    for thread in session.exec(query).all():
+        if awaiting == "me" and not is_my_turn(next_actions(thread, agent)):
+            continue
+        items.append(
+            InboxItem(
+                thread_id=thread.id or 0,
+                status=thread.status,
+                updated_at=thread.updated_at,
+                cursor=encode_cursor(thread.updated_at, thread.id or 0),
+            )
+        )
+        if len(items) == _INBOX_PAGE:
+            break
+    return InboxPage(threads=items)
 
 
 def get_thread(session: Session, agent: Agent, thread_id: int) -> ThreadView:
     """The thread, its messages, and next_actions. FORBIDDEN for anyone else."""
-    raise NotImplementedError("Augusto: negotiation.get_thread")
+    thread = session.get(Thread, thread_id)
+    if thread is None:
+        raise DomainError(ErrorCode.NOT_FOUND, f"thread {thread_id} not found")
+    if party_role(thread, agent) is None:
+        raise DomainError(
+            ErrorCode.FORBIDDEN,
+            "this thread belongs to other parties",
+            action="get_thread",
+            agent_id=agent.id,
+            detail={"thread_id": thread_id},
+        )
+    _expire_if_stale(session, thread)
+    messages = session.exec(
+        select(Message).where(Message.thread_id == thread.id).order_by(col(Message.id))
+    ).all()
+    return ThreadView(
+        id=thread.id or 0,
+        listing_id=thread.listing_id,
+        status=thread.status,
+        rounds_used=thread.rounds_used,
+        pending_question=thread.pending_question,
+        qty=thread.qty,
+        ship_to=thread.ship_to,
+        need_by=thread.need_by,
+        updated_at=thread.updated_at,
+        next_actions=next_actions(thread, agent),
+        messages=[
+            MessageView(
+                id=message.id or 0,
+                type=message.type,
+                sender_agent_id=message.sender_agent_id,
+                payload=message.payload,
+                text=message.text,
+                created_at=message.created_at,
+            )
+            for message in messages
+        ],
+    )
+
+
+def _expire_if_stale(session: Session, thread: Thread) -> None:
+    if thread.status is not ThreadStatus.OFFERED:
+        return
+    offer = session.exec(
+        select(Offer).where(Offer.thread_id == thread.id).order_by(col(Offer.id).desc())
+    ).first()
+    now = utc_now()
+    if offer is None or now <= offer.expires_at:
+        return
+    thread.status = transition(thread.status, MessageType.EXPIRED, Role.SYSTEM)
+    thread.updated_at = now
+    session.add(thread)
+    session.add(
+        Message(
+            thread_id=thread.id or 0,
+            sender_agent_id=None,
+            type=MessageType.EXPIRED,
+            payload=ExpiredPayload(offer_id=offer.id).model_dump(mode="json"),
+            # Deterministic so two readers expiring the same offer collide on the index.
+            idempotency_key=f"expire-offer-{offer.id}",
+            created_at=now,
+        )
+    )
+    session.flush()

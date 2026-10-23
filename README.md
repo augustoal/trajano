@@ -26,7 +26,8 @@ Settings use the `TRAJANO_` prefix. The default database is `sqlite:///./trajano
 - Domain signatures for the rest of the surface. Each stub raises `NotImplementedError` naming its owner.
 - Accounts that issue and check API keys: HMAC-SHA256 with the pepper, never stored raw. A bad or inactive key is `UNAUTHORIZED` and writes an audit row. A missing key is the same code and does not.
 - `catalog.get_listing`: current listing, tiers sorted by `min_qty`, `price_floor` omitted, `seller_notes` returned and treated as untrusted.
-- The thread state machine: `transition`, `next_actions`, `is_my_turn`, and the inbox cursor. `send` and `get_inbox` are still stubs. `get_inbox` must use `is_my_turn` for `awaiting="me"`.
+- The thread state machine: `transition`, `next_actions`, `is_my_turn`, and the inbox cursor. `get_inbox` and `get_thread` work and expire stale offers lazily on read. `send` is still a stub.
+- Store and listing writes: `create_store`, `create_listing`, `update_listing` (a new version per update), and `get_listing_for_seller`, all idempotent.
 - Offer hash and mandate signing bytes. Golden values are locked in `tests/test_contract.py`.
 - The idempotency helper (`begin` / `complete`). Message and order unique indexes are the race backstop.
 - Both MCP servers, mounted at `/mcp/buyer` and `/mcp/seller`, and the storefront shell (login, listing, search form, threads, owner). Tools return `{code, message, retryable}` and do not raise raw exceptions.
@@ -35,7 +36,7 @@ Settings use the `TRAJANO_` prefix. The default database is `sqlite:///./trajano
 
 | Owner | Still to build |
 |---|---|
-| Augusto | `catalog.search` (beyond the missing-field check), listing writes, `negotiation.send` / inbox, rate limit, owner dashboard |
+| Augusto | `catalog.search` (beyond the missing-field check), `negotiation.send`, rate limit, owner dashboard |
 | Jorge | `agents/` decision logic and the seller YAML |
 | Mateo | `pricing.landed_cost`, `orders.*`, `mandates.*`, `data.seed.load_catalog`, `eval/` |
 
