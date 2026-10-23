@@ -33,7 +33,7 @@ docs/
 
 ## Hard rules
 
-- `agents/` and `eval/` never import from `trajano.domain` or `trajano.models`; they talk to the server only through MCP or HTTP. If an agent needs something the tools do not offer, add a tool.
+- `agents/` and `eval/` never import from `trajano.domain` or `trajano.models`; they talk to the server only through MCP or HTTP. If an agent needs something the tools do not offer, add a tool. The one exception is `trajano.domain.pricing`: `agents/rule_seller.py` and `eval/solver.py` may import that module, because it is pure and the offer, the rule seller, and the solver must share it. They still must not import `trajano.models` or any other domain module.
 - `interfaces/` contains no business logic: parse input, call one domain function, format output.
 - All queries are scoped to the calling agent or company inside the domain layer, not in the interfaces.
 - Tools return structured errors (`{code, message, retryable}`), never raw exceptions.

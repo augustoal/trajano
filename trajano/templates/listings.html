@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Listings · Trajano{% endblock %}
+{% block body %}
+<h1>Listings</h1>
+<p class="muted">A search needs length, ship-to, need-by, and quantity. Other fields narrow the result.</p>
+<form method="get" action="/">
+  <label>Diameter <input name="diameter" value="{{ diameter }}" placeholder="M8"></label>
+  <label>Length (mm) <input name="length_mm" value="{{ length_mm }}" inputmode="decimal"></label>
+  <label>Length tolerance (mm) <input name="length_tolerance_mm" value="{{ length_tolerance_mm }}" inputmode="decimal"></label>
+  <label>Material <input name="material" value="{{ material }}"></label>
+  <label>Grade <input name="grade" value="{{ grade }}"></label>
+  <label>Standard <input name="standard" value="{{ standard }}"></label>
+  <label>Ship to <input name="ship_to" value="{{ ship_to }}"></label>
+  <label>Need by <input name="need_by" value="{{ need_by }}" type="date"></label>
+  <label>Quantity <input name="qty" value="{{ qty }}" inputmode="numeric"></label>
+  <p><button type="submit">Search</button></p>
+</form>
+{% if result %}
+  {% if result.hits %}
+    <table>
+      <thead><tr><th>Listing</th><th>Landed</th></tr></thead>
+      <tbody>
+        {% for hit in result.hits %}
+          <tr>
+            <td><a href="/listing/{{ hit.listing.id }}">{{ hit.listing.diameter }} × {{ hit.listing.length_mm }} {{ hit.listing.material }}</a></td>
+            <td>{{ hit.landed.total }} {{ hit.landed.currency }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% elif not error %}
+    <p>No listings matched.</p>
+  {% endif %}
+  {% if result.excluded %}
+    <h2>Excluded</h2>
+    <ul>
+      {% for row in result.excluded %}
+        <li>{{ row.sku }}: {{ row.reason.value }} — {{ row.detail }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{% endif %}
+{% endblock %}
