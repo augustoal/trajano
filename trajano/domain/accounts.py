@@ -1,14 +1,16 @@
 import hmac
 import secrets
+from datetime import timedelta
 from hashlib import sha256
 
-from sqlmodel import Session, select
+from sqlalchemy import func
+from sqlmodel import Session, col, select
 
 from trajano.config import get_settings
 from trajano.db import utc_now
 from trajano.domain.errors import DomainError
-from trajano.models import Agent, AuditEvent, Company
-from trajano.schemas import ErrorCode, OwnerView, Role
+from trajano.models import Agent, AuditEvent, Company, Message
+from trajano.schemas import ErrorCode, MessageType, OwnerView, Role
 
 _KEY_PREFIX = "tj_"
 
@@ -104,7 +106,26 @@ def enforce_rfq_rate_limit(session: Session, agent: Agent) -> None:
 
     A refusal is RATE_LIMITED and retryable.
     """
-    raise NotImplementedError("Augusto: accounts.enforce_rfq_rate_limit")
+    cap = get_settings().rfq_rate_limit_per_hour
+    sent = session.exec(
+        select(func.count())
+        .select_from(Message)
+        .join(Agent, col(Message.sender_agent_id) == Agent.id)
+        .where(
+            Agent.company_id == agent.company_id,
+            Message.type == MessageType.RFQ,
+            Message.created_at > utc_now() - timedelta(hours=1),
+        )
+    ).one()
+    if sent >= cap:
+        raise DomainError(
+            ErrorCode.RATE_LIMITED,
+            f"your company has sent {cap} rfqs in the last hour; retry later",
+            retryable=True,
+            action="rfq_rate_limit",
+            agent_id=agent.id,
+            detail={"cap": cap},
+        )
 
 
 def set_agent_active(

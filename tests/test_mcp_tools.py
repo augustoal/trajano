@@ -100,19 +100,7 @@ def test_unimplemented_tool_returns_a_structured_error(
     _buyer, key = make_buyer(session)
     session.commit()
     monkeypatch.setattr(support, "current_api_key", lambda: key)
-    result = asyncio.run(
-        _call(
-            buyer_mcp,
-            "request_quote",
-            {
-                "listing_id": 1,
-                "qty": 10,
-                "ship_to": "US-CA",
-                "need_by": "2026-12-01",
-                "idempotency_key": "abc",
-            },
-        )
-    )
+    result = asyncio.run(_call(buyer_mcp, "get_order", {"order_id": 1}))
     body = _body(result)
     assert body["error"]["code"] == "NOT_IMPLEMENTED"
     assert result.isError is False

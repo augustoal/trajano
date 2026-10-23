@@ -26,7 +26,7 @@ Settings use the `TRAJANO_` prefix. The default database is `sqlite:///./trajano
 - Domain signatures for the rest of the surface. Each stub raises `NotImplementedError` naming its owner.
 - Accounts that issue and check API keys: HMAC-SHA256 with the pepper, never stored raw. A bad or inactive key is `UNAUTHORIZED` and writes an audit row. A missing key is the same code and does not.
 - `catalog.get_listing`: current listing, tiers sorted by `min_qty`, `price_floor` omitted, `seller_notes` returned and treated as untrusted.
-- The thread state machine: `transition`, `next_actions`, `is_my_turn`, and the inbox cursor. `get_inbox` and `get_thread` work and expire stale offers lazily on read. `send` is still a stub.
+- The thread state machine: `transition`, `next_actions`, `is_my_turn`, and the inbox cursor. `get_inbox` and `get_thread` work and expire stale offers lazily on read. `send` applies `question`, `answer`, `rfq`, `decline`, `counter`, and `withdraw`, with the per-company `rfq` rate limit. `offer` waits on `pricing.landed_cost`, and `accept` and the order messages wait on `orders`; until then they return `NOT_IMPLEMENTED`.
 - Store and listing writes: `create_store`, `create_listing`, `update_listing` (a new version per update), and `get_listing_for_seller` (the seller's `get_listing` tool). Writes are idempotent.
 - Offer hash and mandate signing bytes. Golden values are locked in `tests/test_contract.py`.
 - The idempotency helper (`begin` / `complete`). Message and order unique indexes are the race backstop.
@@ -36,7 +36,7 @@ Settings use the `TRAJANO_` prefix. The default database is `sqlite:///./trajano
 
 | Owner | Still to build |
 |---|---|
-| Augusto | `catalog.search` (beyond the missing-field check), `negotiation.send`, rate limit, owner dashboard |
+| Augusto | `catalog.search` (beyond the missing-field check), `send` for `offer`, `accept`, and order messages, owner dashboard, pausing agents |
 | Jorge | `agents/` decision logic and the seller YAML |
 | Mateo | `pricing.landed_cost`, `orders.*`, `mandates.*`, `data.seed.load_catalog`, `eval/` |
 
@@ -70,4 +70,5 @@ These are the calls the foundation made where the architecture left a gap. Say s
 - **`mark_delivered`.** The seller message list in the architecture omitted it. The message type exists, and the rule is one tool per message type, so the seller server has it.
 - **Seller `get_listing`.** The architecture's seller list had no read for a listing. The seller server has `get_listing`, which returns `ListingSeller` with `price_floor` to the owning company and `FORBIDDEN` to anyone else.
 - **Lazy expiry.** Reads expire an `OFFERED` thread whose latest offer is past `expires_at` and add a system `expired` message with the key `expire-offer-{offer_id}`. An `ACCEPTED` thread whose order is still `SUBMITTED` after `order_confirm_hours` expires the same way, but that path belongs to `orders` (Mateo): it rejects the order and returns the stock in the same transaction, and `negotiation` calls it on read once it exists.
+- **Threads from a listing.** `question` and `rfq` reuse the buyer's newest thread on that listing while it is `OPEN`, `QUOTE_REQUESTED`, `OFFERED`, or `COUNTERED`, and otherwise open a new one. They refuse a listing version that is no longer current (`CONFLICT`) and the buyer's own company (`OWN_COMPANY`).
 - **Seller order tools.** Confirm, reject, ship, and deliver call `negotiation.send` only. The domain send path is what calls into orders, in the same transaction.

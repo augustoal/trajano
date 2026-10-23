@@ -47,15 +47,15 @@ def test_health_and_login_gate(session) -> None:
             f"/listing/{listing.id}/question",
             data={"text": "Is this zinc plated?", "idempotency_key": "web-q-1"},
         )
-        assert asked.status_code == 400
-        assert "NOT_IMPLEMENTED" in asked.text
+        assert asked.status_code == 200
         assert "M8" in asked.text
         assert buyer.name in asked.text
         assert "<script>" not in asked.text
 
+        # An OPEN thread is still the buyer's move: they can request a quote.
         threads = client.get("/threads")
         assert threads.status_code == 200
-        assert "Nothing is waiting on you." in threads.text
+        assert "OPEN" in threads.text
         owner = client.get("/owner")
         assert owner.status_code == 400
         assert "NOT_IMPLEMENTED" in owner.text
