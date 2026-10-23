@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Owner · Trajano{% endblock %}
+{% block body %}
+<h1>Owner</h1>
+<p class="muted">Approvals, mandates, and agents for your company.</p>
+{% if result %}
+  <h2>Approvals</h2>
+  {% if result.approvals %}
+    <ul>{% for row in result.approvals %}<li>#{{ row.id }} offer {{ row.offer_id }} {{ row.status.value }}</li>{% endfor %}</ul>
+  {% else %}
+    <p>No approvals waiting.</p>
+  {% endif %}
+  <h2>Mandates</h2>
+  {% if result.mandates %}
+    <ul>{% for row in result.mandates %}<li>#{{ row.id }} agent {{ row.agent_id }} max {{ row.max_total }} {{ row.currency }}</li>{% endfor %}</ul>
+  {% else %}
+    <p>No mandates.</p>
+  {% endif %}
+  <h2>Agents</h2>
+  {% if result.agents %}
+    <ul>{% for row in result.agents %}<li>#{{ row.id }} {{ row.name }} {% if row.active %}active{% else %}paused{% endif %}</li>{% endfor %}</ul>
+  {% else %}
+    <p>No agents.</p>
+  {% endif %}
+{% endif %}
+<h2>Revoke a mandate</h2>
+<form method="post" action="/owner/revoke">
+  <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+  <label>Mandate id <input name="mandate_id" inputmode="numeric" required></label>
+  <p><button type="submit">Revoke</button></p>
+</form>
+<h2>Pause or restore an agent</h2>
+<form method="post" action="/owner/agent">
+  <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+  <label>Agent id <input name="agent_id" inputmode="numeric" required></label>
+  <label>Active
+    <select name="active">
+      <option value="false">Paused</option>
+      <option value="true">Active</option>
+    </select>
+  </label>
+  <p><button type="submit">Update</button></p>
+</form>
+{% endblock %}

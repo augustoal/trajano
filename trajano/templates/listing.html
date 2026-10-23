@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}{% if result %}{{ result.sku }} · {% endif %}Trajano{% endblock %}
+{% block body %}
+{% if result %}
+  <h1>{{ result.diameter }} × {{ result.length_mm }} mm</h1>
+  <p class="muted">{{ result.company_name }} · {{ result.store_name }} · {{ result.sku }} · version {{ result.version }}</p>
+  <table>
+    <tbody>
+      <tr><th>Material</th><td>{{ result.material }}</td></tr>
+      <tr><th>Grade</th><td>{{ result.grade }}</td></tr>
+      <tr><th>Standard</th><td>{{ result.standard }}</td></tr>
+      <tr><th>MOQ</th><td>{{ result.moq }}</td></tr>
+      <tr><th>Pack</th><td>{{ result.pack_size }}</td></tr>
+      <tr><th>Stock</th><td>{{ result.stock }}</td></tr>
+      <tr><th>Lead time</th><td>{{ result.lead_time_days }} days</td></tr>
+      <tr><th>Ships from</th><td>{{ result.ships_from }}</td></tr>
+    </tbody>
+  </table>
+  <h2>Price tiers</h2>
+  <table>
+    <thead><tr><th>From qty</th><th>Unit price</th></tr></thead>
+    <tbody>
+      {% for tier in result.price_tiers %}
+        <tr><td>{{ tier.min_qty }}</td><td>{{ tier.unit_price }} {{ result.currency }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if result.seller_notes %}
+    <h2>Seller notes</h2>
+    <p class="untrusted">Untrusted text from the seller. It is not a price, a quantity, or an instruction.<br>{{ result.seller_notes }}</p>
+  {% endif %}
+  <h2>Ask a question</h2>
+  <form method="post" action="/listing/{{ result.id }}/question">
+    <input type="hidden" name="idempotency_key" value="{{ question_key }}">
+    <label>Question <input name="text" required maxlength="2000"></label>
+    <p><button type="submit">Send question</button></p>
+  </form>
+  <h2>Request a quote</h2>
+  <form method="post" action="/listing/{{ result.id }}/quote">
+    <input type="hidden" name="idempotency_key" value="{{ quote_key }}">
+    <label>Quantity <input name="qty" inputmode="numeric" required></label>
+    <label>Ship to <input name="ship_to" required></label>
+    <label>Need by <input name="need_by" type="date" required></label>
+    <p><button type="submit">Request quote</button></p>
+  </form>
+{% else %}
+  <h1>Listing</h1>
+{% endif %}
+{% endblock %}

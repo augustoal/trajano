@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Threads · Trajano{% endblock %}
+{% block body %}
+<h1>Threads</h1>
+<p class="muted">Only threads where it is your turn.</p>
+{% if result and result.threads %}
+  <table>
+    <thead><tr><th>Thread</th><th>Status</th><th>Updated</th></tr></thead>
+    <tbody>
+      {% for row in result.threads %}
+        <tr>
+          <td><a href="/threads/{{ row.thread_id }}">{{ row.thread_id }}</a></td>
+          <td>{{ row.status.value }}</td>
+          <td>{{ row.updated_at }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% elif not error %}
+  <p>Nothing is waiting on you.</p>
+{% endif %}
+{% endblock %}

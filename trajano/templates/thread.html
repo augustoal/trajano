@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Thread · Trajano{% endblock %}
+{% block body %}
+{% if result %}
+  <h1>Thread {{ result.id }}</h1>
+  <p class="muted">{{ result.status.value }} · round {{ result.rounds_used }}</p>
+  {% if result.qty %}<p>Quantity {{ result.qty }} to {{ result.ship_to }}, needed {{ result.need_by }}.</p>{% endif %}
+  <p>You can: {% for action in result.next_actions %}{{ action.value }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  <ol>
+    {% for message in result.messages %}
+      <li>
+        <strong>{{ message.type.value }}</strong>
+        {% if message.text %}<span class="untrusted">{{ message.text }}</span>{% endif %}
+      </li>
+    {% endfor %}
+  </ol>
+{% else %}
+  <h1>Thread</h1>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Trajano{% endblock %}</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      font: 17px/1.5 Georgia, "Iowan Old Style", Palatino, serif;
+      margin: 2rem auto;
+      max-width: 44rem;
+      padding: 0 1rem;
+      color: #1c1917;
+      background: #fafaf9;
+    }
+    header, footer { display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; }
+    header { border-bottom: 1px solid #d6d3d1; margin-bottom: 1.5rem; }
+    footer { border-top: 1px solid #d6d3d1; margin-top: 2rem; color: #57534e; font-size: 0.9rem; }
+    nav a, nav button { margin-left: 0.8rem; }
+    a { color: #9a3412; }
+    h1 { font-weight: 500; font-size: 1.8rem; margin: 0 0 0.4rem; }
+    .error { background: #fef2f2; border: 1px solid #fecaca; padding: 0.75rem 1rem; margin: 1rem 0; }
+    .untrusted { background: #fffbeb; border: 1px dashed #d97706; padding: 0.75rem 1rem; }
+    label { display: block; margin-top: 0.8rem; }
+    input, button { font: inherit; }
+    button, .button { background: #1c1917; color: #fafaf9; border: 0; padding: 0.35rem 0.8rem; cursor: pointer; text-decoration: none; display: inline-block; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid #e7e5e4; vertical-align: top; }
+    .muted { color: #57534e; }
+    form.inline { display: inline; }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/">Trajano</a>
+    <nav>
+      {% if agent_name %}
+        <span class="muted">{{ agent_name }}</span>
+        <a href="/threads">Threads</a>
+        <a href="/owner">Owner</a>
+        <form class="inline" method="post" action="/logout"><button type="submit">Log out</button></form>
+      {% else %}
+        <a href="/login">Log in</a>
+      {% endif %}
+    </nav>
+  </header>
+  {% if error %}
+    <p class="error"><strong>{{ error_code }}</strong> {{ error }}</p>
+  {% endif %}
+  {% block body %}{% endblock %}
+  <footer>
+    <span>Fasteners. No JavaScript.</span>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Log in · Trajano{% endblock %}
+{% block body %}
+<h1>Log in</h1>
+<p class="muted">Use the API key for the agent that will browse and buy. The same key is the buyer on the MCP tools.</p>
+<form method="post" action="/login">
+  <input type="hidden" name="next" value="{{ next }}">
+  <label>API key <input name="api_key" type="password" autocomplete="off" required></label>
+  <p><button type="submit">Continue</button></p>
+</form>
+{% endblock %}
