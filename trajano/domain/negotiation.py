@@ -8,7 +8,7 @@ from sqlmodel import Session, col, select
 
 from trajano.config import get_settings
 from trajano.db import utc_now
-from trajano.domain import accounts, idempotency
+from trajano.domain import accounts, idempotency, orders
 from trajano.domain.errors import DomainError, Refusal
 from trajano.models import Agent, Listing, Message, Offer, Store, Thread
 from trajano.schemas import (
@@ -270,7 +270,10 @@ def get_inbox(
         return InboxPage(threads=[])
 
     offered = session.exec(
-        select(Thread).where(or_(*sides), Thread.status == ThreadStatus.OFFERED)
+        select(Thread).where(
+            or_(*sides),
+            col(Thread.status).in_([ThreadStatus.OFFERED, ThreadStatus.ACCEPTED]),
+        )
     ).all()
     for thread in offered:
         _expire_if_stale(session, thread)
@@ -502,6 +505,9 @@ def _check_countered_offer(session: Session, thread: Thread, offer_id: int) -> N
 
 
 def _expire_if_stale(session: Session, thread: Thread) -> None:
+    if thread.status is ThreadStatus.ACCEPTED:
+        orders.expire_unconfirmed(session, thread)
+        return
     if thread.status is not ThreadStatus.OFFERED:
         return
     offer = session.exec(

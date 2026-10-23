@@ -1,29 +1,36 @@
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
+from trajano.config import get_settings
 from trajano.db import utc_now
 from trajano.domain import mandates
 from trajano.domain.errors import DomainError
-from trajano.models import Agent, Listing, Offer, Order, Thread
+from trajano.models import Agent, Listing, Message, Offer, Order, Thread
 from trajano.schemas import (
     CostLine,
     DeclineReason,
     ErrorCode,
+    ExpiredPayload,
     MandateDocument,
+    MessageType,
     OfferFingerprint,
     OrderStatus,
     OrderView,
     Role,
+    ThreadStatus,
     offer_hash,
     quantize_money,
     quantize_unit,
 )
+
+# reason_code on an order the seller did not confirm in time.
+EXPIRED_REASON = "EXPIRED"
 
 # The seller transitions (confirm, reject, ship, deliver) run inside
 # negotiation.send, which owns the idempotency key for that message. Here a
@@ -119,6 +126,11 @@ def confirm(session: Session, agent: Agent, order_id: int, idempotency_key: str)
     if order.status is OrderStatus.CONFIRMED:
         return order
     _require(order, OrderStatus.SUBMITTED, "confirm")
+    if _overdue(order, utc_now()):
+        raise DomainError(
+            ErrorCode.INVALID_TRANSITION,
+            f"the {get_settings().order_confirm_hours} hour confirmation window has closed",
+        )
     order.status = OrderStatus.CONFIRMED
     order.confirmed_at = utc_now()
     return _save(session, order)
@@ -136,23 +148,46 @@ def reject(
     if order.status is OrderStatus.REJECTED:
         return order
     _require(order, OrderStatus.SUBMITTED, "reject")
-    offer = session.get(Offer, order.offer_id)
-    listing = session.get(Listing, offer.listing_id) if offer is not None else None
-    if offer is None or listing is None:
-        raise DomainError(ErrorCode.INTERNAL, "order is missing its offer", retryable=True)
-    session.execute(
-        update(Listing)
-        .where(
-            Listing.store_id == listing.store_id,
-            Listing.sku == listing.sku,
-            Listing.is_current.is_(True),
+    return _release(session, order, reason_code.value)
+
+
+def expire_unconfirmed(session: Session, thread: Thread) -> bool:
+    """Expire an ACCEPTED thread whose order is still SUBMITTED after order_confirm_hours.
+
+    negotiation calls this on read. The order is rejected with reason EXPIRED,
+    its stock goes back, and the thread gets a system expired message, all in
+    the caller's transaction. Returns whether the thread expired.
+    """
+    if thread.status is not ThreadStatus.ACCEPTED:
+        return False
+    found = session.exec(
+        select(Order, Offer)
+        .join(Offer, col(Order.offer_id) == col(Offer.id))
+        .where(Offer.thread_id == thread.id, Order.status == OrderStatus.SUBMITTED)
+    ).first()
+    if found is None:
+        return False
+    order, offer = found
+    now = utc_now()
+    if not _overdue(order, now):
+        return False
+    _release(session, order, EXPIRED_REASON)
+    thread.status = ThreadStatus.EXPIRED
+    thread.updated_at = now
+    session.add(thread)
+    session.add(
+        Message(
+            thread_id=thread.id or 0,
+            sender_agent_id=None,
+            type=MessageType.EXPIRED,
+            payload=ExpiredPayload(offer_id=offer.id).model_dump(mode="json"),
+            # Deterministic so two readers expiring the same order collide on the index.
+            idempotency_key=f"expire-order-{order.id}",
+            created_at=now,
         )
-        .values(stock=Listing.stock + offer.qty)
     )
-    order.status = OrderStatus.REJECTED
-    order.reason_code = reason_code.value
-    order.rejected_at = utc_now()
-    return _save(session, order)
+    session.flush()
+    return True
 
 
 def ship(
@@ -294,6 +329,31 @@ def _require(order: Order, status: OrderStatus, step: str) -> None:
             ErrorCode.INVALID_TRANSITION,
             f"cannot {step} an order that is {order.status.value}",
         )
+
+
+def _overdue(order: Order, now: datetime) -> bool:
+    return now > order.created_at + timedelta(hours=get_settings().order_confirm_hours)
+
+
+def _release(session: Session, order: Order, reason_code: str) -> Order:
+    """Reject the order and put its stock back on the current listing version."""
+    offer = session.get(Offer, order.offer_id)
+    listing = session.get(Listing, offer.listing_id) if offer is not None else None
+    if offer is None or listing is None:
+        raise DomainError(ErrorCode.INTERNAL, "order is missing its offer", retryable=True)
+    session.execute(
+        update(Listing)
+        .where(
+            Listing.store_id == listing.store_id,
+            Listing.sku == listing.sku,
+            Listing.is_current.is_(True),
+        )
+        .values(stock=Listing.stock + offer.qty)
+    )
+    order.status = OrderStatus.REJECTED
+    order.reason_code = reason_code
+    order.rejected_at = utc_now()
+    return _save(session, order)
 
 
 def _save(session: Session, order: Order) -> Order:
