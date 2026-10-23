@@ -171,7 +171,7 @@ A function `send(agent, thread, type, payload, idem_key)` does all the work:
 
 In addition, `next_actions(thread, agent)` tells each side what it can do, and this is returned in `get_thread`.
 
-Expiry is evaluated lazily: an offer is expired if `now > expires_at`, checked on read or accept. No background jobs are needed.
+Expiry is evaluated lazily: an offer is expired if `now > expires_at`, checked on read or accept. No background jobs are needed. The same applies to an accepted order the seller has not confirmed within `order_confirm_hours`: on read, the thread moves from `ACCEPTED` to `EXPIRED`. `negotiation` owns the offer case. `orders` owns the order case, because it must also mark the order rejected and return the stock in the same transaction, and `negotiation`'s read path calls it.
 
 **`orders.py`** has `accept(offer, hash, mandate, idem_key)`, which does everything in one transaction:
 - Idempotency: if an order with that key already exists, it returns it.
@@ -191,7 +191,9 @@ Then `confirm`/`reject` (reject returns the stock), `ship` and `deliver`. Also t
 `search_listings`, `get_listing`, `ask_question`, `request_quote`, `counter_offer`, `request_approval`, `get_approval`, `accept_offer`, `withdraw`, `get_inbox`, `get_thread`, `get_order`.
 
 **Seller MCP** (`/mcp/seller`):
-`create_store`, `create_listing`, `update_listing`, `get_inbox`, `get_thread`, `answer_question`, `make_offer`, `decline`, `confirm_order`, `reject_order`, `mark_shipped`, `export_order_csv`.
+`create_store`, `create_listing`, `update_listing`, `get_listing`, `get_inbox`, `get_thread`, `answer_question`, `make_offer`, `decline`, `confirm_order`, `reject_order`, `mark_shipped`, `export_order_csv`.
+
+The seller's `get_listing` returns the same listing as the buyer's plus `price_floor`, and only for the company that owns it, so a seller agent can read back its own listing before quoting.
 
 There are two servers so each agent sees only its own tools. An agent with both roles connects to both.
 

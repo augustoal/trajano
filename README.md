@@ -27,7 +27,7 @@ Settings use the `TRAJANO_` prefix. The default database is `sqlite:///./trajano
 - Accounts that issue and check API keys: HMAC-SHA256 with the pepper, never stored raw. A bad or inactive key is `UNAUTHORIZED` and writes an audit row. A missing key is the same code and does not.
 - `catalog.get_listing`: current listing, tiers sorted by `min_qty`, `price_floor` omitted, `seller_notes` returned and treated as untrusted.
 - The thread state machine: `transition`, `next_actions`, `is_my_turn`, and the inbox cursor. `get_inbox` and `get_thread` work and expire stale offers lazily on read. `send` is still a stub.
-- Store and listing writes: `create_store`, `create_listing`, `update_listing` (a new version per update), and `get_listing_for_seller`, all idempotent.
+- Store and listing writes: `create_store`, `create_listing`, `update_listing` (a new version per update), and `get_listing_for_seller` (the seller's `get_listing` tool). Writes are idempotent.
 - Offer hash and mandate signing bytes. Golden values are locked in `tests/test_contract.py`.
 - The idempotency helper (`begin` / `complete`). Message and order unique indexes are the race backstop.
 - Both MCP servers, mounted at `/mcp/buyer` and `/mcp/seller`, and the storefront shell (login, listing, search form, threads, owner). Tools return `{code, message, retryable}` and do not raise raw exceptions.
@@ -68,4 +68,6 @@ These are the calls the foundation made where the architecture left a gap. Say s
 - **Clock.** `trajano.db.utc_now`. Tests freeze it. `datetime.now` is only allowed in `db.py`.
 - **Search.** `search` rejects a spec that is missing `length_mm`, `ship_to`, `need_by`, or `qty`, in that order, with `SPEC_INCOMPLETE` and the message `missing a, b`. The rest waits on `pricing.landed_cost`. Results will sort by landed cost, then listing id, and will exclude on MOQ, stock, and date.
 - **`mark_delivered`.** The seller message list in the architecture omitted it. The message type exists, and the rule is one tool per message type, so the seller server has it.
+- **Seller `get_listing`.** The architecture's seller list had no read for a listing. The seller server has `get_listing`, which returns `ListingSeller` with `price_floor` to the owning company and `FORBIDDEN` to anyone else.
+- **Lazy expiry.** Reads expire an `OFFERED` thread whose latest offer is past `expires_at` and add a system `expired` message with the key `expire-offer-{offer_id}`. An `ACCEPTED` thread whose order is still `SUBMITTED` after `order_confirm_hours` expires the same way, but that path belongs to `orders` (Mateo): it rejects the order and returns the stock in the same transaction, and `negotiation` calls it on read once it exists.
 - **Seller order tools.** Confirm, reject, ship, and deliver call `negotiation.send` only. The domain send path is what calls into orders, in the same transaction.

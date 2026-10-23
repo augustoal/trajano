@@ -181,3 +181,24 @@ def test_seller_tools_create_a_store_and_a_listing(
     assert listing["error"] is None
     assert listing["listing"]["version"] == 1
     assert Decimal(listing["listing"]["price_floor"]) == Decimal("0.15")
+
+
+def test_seller_get_listing_tool_shows_the_floor_to_the_owner_only(
+    session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trajano.interfaces import support
+
+    _seller, key, store = make_seller(session, "Helix")
+    _rival, rival_key, _rival_store = make_seller(session, "Rival")
+    listing = make_listing(session, store)
+    session.commit()
+
+    monkeypatch.setattr(support, "current_api_key", lambda: key)
+    own = _body(asyncio.run(_call(seller_mcp, "get_listing", {"listing_id": listing.id})))
+    assert own["error"] is None
+    assert Decimal(own["listing"]["price_floor"]) == Decimal("0.05")
+
+    monkeypatch.setattr(support, "current_api_key", lambda: rival_key)
+    other = _body(asyncio.run(_call(seller_mcp, "get_listing", {"listing_id": listing.id})))
+    assert other["error"]["code"] == "FORBIDDEN"
+    assert other["listing"] is None

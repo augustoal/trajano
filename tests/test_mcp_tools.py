@@ -34,6 +34,7 @@ SELLER_TOOLS = {
     "create_store",
     "create_listing",
     "update_listing",
+    "get_listing",
     "get_inbox",
     "get_thread",
     "answer_question",
