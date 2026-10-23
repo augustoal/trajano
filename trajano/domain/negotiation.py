@@ -1,19 +1,26 @@
 from datetime import UTC, datetime
 from typing import Literal
 
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import and_, or_
 from sqlmodel import Session, col, select
 
+from trajano.config import get_settings
 from trajano.db import utc_now
+from trajano.domain import accounts, idempotency
 from trajano.domain.errors import DomainError
-from trajano.models import Agent, Message, Offer, Thread
+from trajano.models import Agent, Listing, Message, Offer, Store, Thread
 from trajano.schemas import (
+    PAYLOAD_MODELS,
+    CounterPayload,
     ErrorCode,
     ExpiredPayload,
     InboxItem,
     InboxPage,
     MessageType,
     MessageView,
+    QuestionPayload,
+    RfqPayload,
     Role,
     SendResult,
     ThreadStatus,
@@ -36,6 +43,19 @@ _TURN = {
 }
 
 _INBOX_PAGE = 100
+
+# These need pricing.landed_cost or the orders module before send can apply them.
+_WAITING = {
+    MessageType.OFFER: "pricing.landed_cost",
+    MessageType.ACCEPT: "orders.accept",
+    MessageType.ORDER_CONFIRM: "orders.confirm",
+    MessageType.ORDER_REJECT: "orders.reject",
+    MessageType.SHIPPED: "orders.ship",
+    MessageType.DELIVERED: "orders.deliver",
+}
+
+# Messages that may open a thread from a listing instead of naming one.
+_OPENERS = (MessageType.QUESTION, MessageType.RFQ)
 
 _QUIET = (
     ThreadStatus.OPEN,
@@ -170,7 +190,103 @@ def send(
     8. Persist Message and the new Thread.status together, then idempotency.complete.
     Expiry is lazy: an offer with now > expires_at becomes EXPIRED on read or accept.
     """
-    raise NotImplementedError("Augusto: negotiation.send")
+    if message_type in _WAITING:
+        raise NotImplementedError(
+            f"Augusto: negotiation.send {message_type.value} waits on {_WAITING[message_type]}"
+        )
+    body = _validate(message_type, payload)
+    fingerprint = idempotency.request_fingerprint(
+        {
+            "op": "send",
+            "type": message_type.value,
+            "thread_id": thread_id,
+            "listing_id": listing_id,
+            "payload": body.model_dump(mode="json"),
+            "text": text,
+        }
+    )
+    stored = idempotency.begin(session, agent.id or 0, idempotency_key, fingerprint)
+    if stored is not None:
+        return SendResult.model_validate(stored)
+    if text is not None and len(text) > get_settings().text_max_length:
+        raise DomainError(ErrorCode.VALIDATION, "text is too long")
+
+    if thread_id is None:
+        if message_type not in _OPENERS or listing_id is None:
+            raise DomainError(ErrorCode.VALIDATION, "thread_id is required")
+        thread = _thread_for_listing(session, agent, listing_id)
+    else:
+        thread = session.get(Thread, thread_id)
+        if thread is None:
+            raise DomainError(ErrorCode.NOT_FOUND, f"thread {thread_id} not found")
+    if isinstance(body, QuestionPayload | RfqPayload) and body.listing_id != thread.listing_id:
+        raise DomainError(ErrorCode.VALIDATION, "listing_id does not match the thread")
+
+    role = party_role(thread, agent)
+    if role is None:
+        raise DomainError(
+            ErrorCode.FORBIDDEN,
+            "this thread belongs to other parties",
+            action="send",
+            agent_id=agent.id,
+            detail={"thread_id": thread.id, "type": message_type.value},
+        )
+
+    _expire_if_stale(session, thread)
+    if thread.status is ThreadStatus.EXPIRED and message_type is MessageType.COUNTER:
+        raise DomainError(ErrorCode.STALE_OFFER, "the offer expired")
+    if message_type is MessageType.COUNTER and thread.rounds_used >= 1:
+        raise DomainError(
+            ErrorCode.ROUND_LIMIT,
+            "only one counter is allowed; accept or withdraw the final offer",
+            action="send",
+            agent_id=agent.id,
+            detail={"thread_id": thread.id},
+        )
+    destination = transition(thread.status, message_type, role)
+
+    now = utc_now()
+    match body:
+        case QuestionPayload():
+            thread.pending_question = True
+        case RfqPayload():
+            if body.need_by < now.date():
+                raise DomainError(ErrorCode.VALIDATION, "need_by is in the past")
+            accounts.enforce_rfq_rate_limit(session, agent)
+            thread.qty = body.qty
+            thread.ship_to = body.ship_to
+            thread.need_by = body.need_by
+        case CounterPayload():
+            _check_countered_offer(session, thread, body.offer_id)
+            thread.rounds_used += 1
+    if message_type is MessageType.ANSWER:
+        if not thread.pending_question:
+            raise DomainError(ErrorCode.INVALID_TRANSITION, "no question is waiting for an answer")
+        thread.pending_question = False
+
+    message = Message(
+        thread_id=thread.id or 0,
+        sender_agent_id=agent.id,
+        type=message_type,
+        payload=body.model_dump(mode="json"),
+        text=text,
+        idempotency_key=idempotency_key,
+        created_at=now,
+    )
+    thread.status = destination
+    thread.updated_at = now
+    session.add(thread)
+    session.add(message)
+    session.flush()
+
+    result = SendResult(
+        thread_id=thread.id or 0,
+        message_id=message.id or 0,
+        status=thread.status,
+        next_actions=next_actions(thread, agent),
+    )
+    idempotency.complete(session, agent.id or 0, idempotency_key, result.model_dump(mode="json"))
+    return result
 
 
 def get_inbox(
@@ -268,6 +384,71 @@ def get_thread(session: Session, agent: Agent, thread_id: int) -> ThreadView:
             for message in messages
         ],
     )
+
+
+def _validate(message_type: MessageType, payload: object) -> BaseModel:
+    model = PAYLOAD_MODELS[message_type]
+    if isinstance(payload, model):
+        return payload
+    try:
+        return model.model_validate(payload)
+    except ValidationError as exc:
+        raise DomainError(ErrorCode.VALIDATION, f"invalid {message_type.value} payload") from exc
+
+
+def _thread_for_listing(session: Session, agent: Agent, listing_id: int) -> Thread:
+    """Reuse the buyer's live thread on this listing, or open one in OPEN."""
+    listing = session.get(Listing, listing_id)
+    if listing is None:
+        raise DomainError(ErrorCode.NOT_FOUND, f"listing {listing_id} not found")
+    if not listing.is_current:
+        raise DomainError(
+            ErrorCode.CONFLICT, f"listing {listing_id} has a newer version; read it again"
+        )
+    store = session.get(Store, listing.store_id)
+    if store is None:
+        raise DomainError(ErrorCode.INTERNAL, "listing is missing its store", retryable=True)
+    if store.company_id == agent.company_id:
+        raise DomainError(
+            ErrorCode.OWN_COMPANY,
+            "you cannot buy from your own company",
+            action="send",
+            agent_id=agent.id,
+            detail={"listing_id": listing_id},
+        )
+    live = session.exec(
+        select(Thread)
+        .where(
+            Thread.buyer_agent_id == agent.id,
+            Thread.listing_id == listing_id,
+            col(Thread.status).in_(_QUIET),
+        )
+        .order_by(col(Thread.id).desc())
+    ).first()
+    if live is not None:
+        return live
+    thread = Thread(
+        listing_id=listing_id,
+        buyer_agent_id=agent.id or 0,
+        seller_store_id=store.id or 0,
+        seller_company_id=store.company_id,
+        status=ThreadStatus.OPEN,
+        created_at=utc_now(),
+        updated_at=utc_now(),
+    )
+    session.add(thread)
+    session.flush()
+    return thread
+
+
+def _check_countered_offer(session: Session, thread: Thread, offer_id: int) -> None:
+    latest = session.exec(
+        select(Offer).where(Offer.thread_id == thread.id).order_by(col(Offer.id).desc())
+    ).first()
+    if latest is None or session.get(Offer, offer_id) is None:
+        raise DomainError(ErrorCode.NOT_FOUND, f"offer {offer_id} not found")
+    if latest.id != offer_id:
+        raise DomainError(ErrorCode.STALE_OFFER, f"offer {offer_id} is not the current offer")
 
 
 def _expire_if_stale(session: Session, thread: Thread) -> None:
