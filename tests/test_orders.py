@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 from sqlmodel import Session, select
 
-from tests.factories import make_buyer, make_listing, make_offer, make_seller
+from tests.factories import make_buyer, make_listing, make_priced_offer, make_seller
 from trajano.db import freeze_clock, get_engine
 from trajano.domain import mandates, orders
 from trajano.domain.accounts import create_agent
@@ -48,7 +48,7 @@ def _deal(session, **listing: object):
     seller, _key, store = make_seller(session)
     buyer, _key = make_buyer(session)
     item = make_listing(session, store, **listing)
-    offer = make_offer(session, buyer, item)
+    offer = make_priced_offer(session, buyer, item)
     return seller, buyer, item, offer, _mandate(session, buyer)
 
 
@@ -88,7 +88,7 @@ def test_accept_replays_by_key(session) -> None:
     assert _stock(session, item) == 1000 - offer.qty
     assert len(session.exec(select(Order)).all()) == 1
 
-    other = make_offer(session, buyer, item)
+    other = make_priced_offer(session, buyer, item)
     assert _code(lambda: orders.accept(session, buyer, other, mandate, "buy-1")).code is (
         ErrorCode.CONFLICT
     )
@@ -235,7 +235,7 @@ def test_two_buyers_racing_for_the_last_stock_get_one_order(session) -> None:
     deals = []
     for name in ("Ada", "Bea"):
         buyer, _key = make_buyer(session, name)
-        deals.append((buyer, make_offer(session, buyer, item), _mandate(session, buyer)))
+        deals.append((buyer, make_priced_offer(session, buyer, item), _mandate(session, buyer)))
     session.commit()
 
     def accept(buyer: Agent, offer: Offer, mandate: MandateDocument):
