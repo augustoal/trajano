@@ -324,21 +324,6 @@ def test_rfq_rate_limit_is_per_company(session, monkeypatch: pytest.MonkeyPatch)
     _rfq(session, buyer, listings[3], key="r3")
 
 
-def test_offer_waits_on_pricing(session) -> None:
-    seller, _key, store = make_seller(session)
-    buyer, _buyer_key = make_buyer(session)
-    thread = make_thread(session, buyer, make_listing(session, store))
-    with pytest.raises(NotImplementedError, match="pricing.landed_cost"):
-        send(
-            session,
-            seller,
-            message_type=MessageType.OFFER,
-            payload={},
-            idempotency_key="o-1",
-            thread_id=thread.id,
-        )
-
-
 def test_request_quote_tool_round_trip(session, monkeypatch: pytest.MonkeyPatch) -> None:
     from trajano.interfaces import support
 
