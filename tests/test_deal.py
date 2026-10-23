@@ -127,6 +127,9 @@ def test_full_deal_from_rfq_to_delivery(session) -> None:
     assert opening.qty == 250
     assert opening.final is False
     assert opening.expires_at == NOW + timedelta(hours=48)
+    offer_message = get_thread(session, buyer, thread_id).messages[-1]
+    assert offer_message.payload["offer_id"] == opening.id
+    assert offer_message.payload["hash"] == opening.hash
 
     countered = send(
         session,
