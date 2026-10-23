@@ -1,11 +1,14 @@
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 
 from tests.factories import make_listing, make_seller
-from trajano.domain.catalog import get_listing, search
+from trajano.db import freeze_clock
+from trajano.domain.catalog import as_priceable, get_listing, search
 from trajano.domain.errors import DomainError
-from trajano.schemas import ErrorCode, SearchSpec
+from trajano.domain.pricing import landed_cost
+from trajano.schemas import ErrorCode, ExclusionReason, SearchSpec
 
 
 def test_get_listing_hides_the_floor_and_sorts_tiers(session) -> None:
@@ -36,9 +39,39 @@ def test_search_requires_the_buying_spec(session) -> None:
     assert exc.value.message == "missing length_mm, need_by"
 
 
-def test_search_is_not_implemented_once_the_spec_is_complete(session) -> None:
-    from datetime import date
+def test_search_ranks_by_landed_cost_and_explains_exclusions(session) -> None:
+    freeze_clock(datetime(2026, 11, 1, 12, 0, tzinfo=UTC))
+    _agent, _key, store = make_seller(session)
+    pricey = make_listing(session, store, sku="PRICEY")
+    cheap = make_listing(
+        session, store, sku="CHEAP", price_tiers=[{"min_qty": 1, "unit_price": "0.0900"}]
+    )
+    make_listing(session, store, sku="MOQ", moq=1000)
+    make_listing(session, store, sku="STOCK", stock=10)
+    make_listing(session, store, sku="SLOW", lead_time_days=60)
+    make_listing(session, store, sku="M10", diameter="M10")
+    make_listing(session, store, sku="LONG", length_mm=Decimal("35"))
+    make_listing(session, store, sku="OLD", is_current=False)
 
-    spec = SearchSpec(length_mm=Decimal("30"), ship_to="US-CA", need_by=date(2026, 12, 1), qty=100)
-    with pytest.raises(NotImplementedError, match="catalog.search"):
-        search(session, spec)
+    spec = SearchSpec(
+        diameter="M8",
+        length_mm=Decimal("30"),
+        ship_to="US-CA",
+        need_by=date(2026, 11, 20),
+        qty=200,
+    )
+    page = search(session, spec)
+
+    assert [hit.listing.sku for hit in page.hits] == ["CHEAP", "PRICEY"]
+    assert [hit.rank for hit in page.hits] == [1, 2]
+    assert page.hits[0].landed == landed_cost(as_priceable(cheap), 200, "US-CA")
+    assert page.hits[1].landed.total == landed_cost(as_priceable(pricey), 200, "US-CA").total
+    assert "price_floor" not in page.hits[0].listing.model_dump()
+    assert {row.sku: row.reason for row in page.excluded} == {
+        "MOQ": ExclusionReason.MOQ,
+        "STOCK": ExclusionReason.STOCK,
+        "SLOW": ExclusionReason.DATE,
+    }
+
+    wider = search(session, spec.model_copy(update={"length_tolerance_mm": Decimal("5")}))
+    assert "LONG" in [hit.listing.sku for hit in wider.hits]

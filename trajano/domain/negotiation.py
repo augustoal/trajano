@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ValidationError
@@ -8,26 +8,38 @@ from sqlmodel import Session, col, select
 
 from trajano.config import get_settings
 from trajano.db import utc_now
-from trajano.domain import accounts, idempotency, orders
+from trajano.domain import accounts, idempotency, orders, pricing
+from trajano.domain.catalog import as_priceable
 from trajano.domain.errors import DomainError, Refusal
-from trajano.models import Agent, Listing, Message, Offer, Store, Thread
+from trajano.models import Agent, Listing, Message, Offer, Order, Store, Thread
 from trajano.schemas import (
     PAYLOAD_MODELS,
+    AcceptPayload,
+    CostLine,
     CounterPayload,
+    DeliveredPayload,
     ErrorCode,
     ExpiredPayload,
     InboxItem,
     InboxPage,
     MessageType,
     MessageView,
+    OfferDraft,
+    OfferFingerprint,
+    OfferPayload,
+    OrderConfirmPayload,
+    OrderRejectPayload,
     QuestionPayload,
     RefusalCode,
     RefusedPayload,
     RfqPayload,
     Role,
     SendResult,
+    ShippedPayload,
     ThreadStatus,
     ThreadView,
+    offer_hash,
+    quantize_money,
 )
 
 # Question is legal before ACCEPTED but it is not a turn: the inbox uses
@@ -49,14 +61,17 @@ _INBOX_PAGE = 100
 
 _REFUSALS = {code.value for code in RefusalCode}
 
-# These need pricing.landed_cost or the orders module before send can apply them.
-_WAITING = {
-    MessageType.OFFER: "pricing.landed_cost",
-    MessageType.ACCEPT: "orders.accept",
-    MessageType.ORDER_CONFIRM: "orders.confirm",
-    MessageType.ORDER_REJECT: "orders.reject",
-    MessageType.SHIPPED: "orders.ship",
-    MessageType.DELIVERED: "orders.deliver",
+_ORDER_STEPS = (
+    MessageType.ORDER_CONFIRM,
+    MessageType.ORDER_REJECT,
+    MessageType.SHIPPED,
+    MessageType.DELIVERED,
+)
+
+# The seller sends a draft; the server prices it, sets the hash, and stores an OfferPayload.
+_INPUT_MODELS: dict[MessageType, type[BaseModel]] = {
+    **PAYLOAD_MODELS,
+    MessageType.OFFER: OfferDraft,
 }
 
 # Messages that may open a thread from a listing instead of naming one.
@@ -195,10 +210,6 @@ def send(
     8. Persist Message and the new Thread.status together, then idempotency.complete.
     Expiry is lazy: an offer with now > expires_at becomes EXPIRED on read or accept.
     """
-    if message_type in _WAITING:
-        raise NotImplementedError(
-            f"Augusto: negotiation.send {message_type.value} waits on {_WAITING[message_type]}"
-        )
     body = _validate(message_type, payload)
     fingerprint = idempotency.request_fingerprint(
         {
@@ -216,7 +227,13 @@ def send(
     if text is not None and len(text) > get_settings().text_max_length:
         raise DomainError(ErrorCode.VALIDATION, "text is too long")
 
-    if thread_id is None:
+    # accept and the order steps name an offer or an order instead of a thread.
+    hidden = False
+    if thread_id is None and isinstance(body, AcceptPayload):
+        thread, hidden = _thread_for_offer(session, body.offer_id), True
+    elif thread_id is None and message_type in _ORDER_STEPS:
+        thread, hidden = _thread_for_order(session, body.order_id), True  # type: ignore[attr-defined]
+    elif thread_id is None:
         if message_type not in _OPENERS or listing_id is None:
             raise DomainError(ErrorCode.VALIDATION, "thread_id is required")
         thread = _thread_for_listing(session, agent, listing_id)
@@ -228,6 +245,10 @@ def send(
         raise DomainError(ErrorCode.VALIDATION, "listing_id does not match the thread")
 
     role = party_role(thread, agent)
+    if role is None and hidden:
+        # Same answer as an id that does not exist, as orders.get_order does.
+        target = "offer" if isinstance(body, AcceptPayload) else "order"
+        raise DomainError(ErrorCode.NOT_FOUND, f"{target} not found")
     if role is None:
         raise DomainError(
             ErrorCode.FORBIDDEN,
@@ -359,7 +380,10 @@ def _apply(
     text: str | None,
 ) -> SendResult:
     _expire_if_stale(session, thread)
-    if thread.status is ThreadStatus.EXPIRED and message_type is MessageType.COUNTER:
+    if thread.status is ThreadStatus.EXPIRED and message_type in (
+        MessageType.COUNTER,
+        MessageType.ACCEPT,
+    ):
         raise DomainError(ErrorCode.STALE_OFFER, "the offer expired")
     if message_type is MessageType.COUNTER and thread.rounds_used >= 1:
         raise DomainError(
@@ -372,6 +396,9 @@ def _apply(
     destination = transition(thread.status, message_type, role)
 
     now = utc_now()
+    stored_payload = body.model_dump(mode="json")
+    offer: OfferPayload | None = None
+    order: Order | None = None
     match body:
         case QuestionPayload():
             thread.pending_question = True
@@ -383,8 +410,39 @@ def _apply(
             thread.ship_to = body.ship_to
             thread.need_by = body.need_by
         case CounterPayload():
-            _check_countered_offer(session, thread, body.offer_id)
+            _check_live_offer(session, thread, body.offer_id)
             thread.rounds_used += 1
+        case OfferDraft():
+            offer = _price_offer(
+                session, agent, thread, body, final=thread.status is ThreadStatus.COUNTERED
+            )
+            stored_payload = offer.model_dump(mode="json")
+        case AcceptPayload():
+            accepted = _check_live_offer(session, thread, body.offer_id)
+            if body.hash != accepted.hash:
+                raise DomainError(
+                    ErrorCode.STALE_OFFER,
+                    "the hash does not match this offer; read the thread again",
+                    action="accept",
+                    agent_id=agent.id,
+                    detail={"offer_id": accepted.id},
+                )
+            order = orders.accept(session, agent, accepted, body.mandate, idempotency_key)
+            # The seller reads this message. The mandate carries the buyer's budget.
+            stored_payload = {
+                "offer_id": accepted.id,
+                "hash": accepted.hash,
+                "order_id": order.id,
+                "mandate_id": order.mandate_id,
+            }
+        case OrderConfirmPayload():
+            order = orders.confirm(session, agent, body.order_id, idempotency_key)
+        case OrderRejectPayload():
+            order = orders.reject(session, agent, body.order_id, body.reason_code, idempotency_key)
+        case ShippedPayload():
+            order = orders.ship(session, agent, body.order_id, body.tracking, idempotency_key)
+        case DeliveredPayload():
+            order = orders.deliver(session, agent, body.order_id, idempotency_key)
     if message_type is MessageType.ANSWER:
         if not thread.pending_question:
             raise DomainError(ErrorCode.INVALID_TRANSITION, "no question is waiting for an answer")
@@ -394,7 +452,7 @@ def _apply(
         thread_id=thread.id or 0,
         sender_agent_id=agent.id,
         type=message_type,
-        payload=body.model_dump(mode="json"),
+        payload=stored_payload,
         text=text,
         idempotency_key=idempotency_key,
         created_at=now,
@@ -404,12 +462,23 @@ def _apply(
     session.add(thread)
     session.add(message)
     session.flush()
+    if offer is not None:
+        session.add(
+            Offer(
+                thread_id=thread.id or 0,
+                message_id=message.id or 0,
+                **offer.model_dump(exclude={"listing_version", "lines"}),
+                lines=[line.model_dump(mode="json") for line in offer.lines],
+            )
+        )
+        session.flush()
 
     result = SendResult(
         thread_id=thread.id or 0,
         message_id=message.id or 0,
         status=thread.status,
         next_actions=next_actions(thread, agent),
+        order_id=order.id if order is not None else None,
     )
     idempotency.complete(session, agent.id or 0, idempotency_key, result.model_dump(mode="json"))
     return result
@@ -440,7 +509,7 @@ def record_refusal(refusal: Refusal, code: ErrorCode, message: str) -> None:
 
 
 def _validate(message_type: MessageType, payload: object) -> BaseModel:
-    model = PAYLOAD_MODELS[message_type]
+    model = _INPUT_MODELS[message_type]
     if isinstance(payload, model):
         return payload
     try:
@@ -494,7 +563,7 @@ def _thread_for_listing(session: Session, agent: Agent, listing_id: int) -> Thre
     return thread
 
 
-def _check_countered_offer(session: Session, thread: Thread, offer_id: int) -> None:
+def _check_live_offer(session: Session, thread: Thread, offer_id: int) -> Offer:
     latest = session.exec(
         select(Offer).where(Offer.thread_id == thread.id).order_by(col(Offer.id).desc())
     ).first()
@@ -502,6 +571,107 @@ def _check_countered_offer(session: Session, thread: Thread, offer_id: int) -> N
         raise DomainError(ErrorCode.NOT_FOUND, f"offer {offer_id} not found")
     if latest.id != offer_id:
         raise DomainError(ErrorCode.STALE_OFFER, f"offer {offer_id} is not the current offer")
+    return latest
+
+
+def _thread_for_offer(session: Session, offer_id: int) -> Thread:
+    offer = session.get(Offer, offer_id)
+    thread = session.get(Thread, offer.thread_id) if offer is not None else None
+    if thread is None:
+        raise DomainError(ErrorCode.NOT_FOUND, "offer not found")
+    return thread
+
+
+def _thread_for_order(session: Session, order_id: int) -> Thread:
+    order = session.get(Order, order_id)
+    offer = session.get(Offer, order.offer_id) if order is not None else None
+    thread = session.get(Thread, offer.thread_id) if offer is not None else None
+    if thread is None:
+        raise DomainError(ErrorCode.NOT_FOUND, "order not found")
+    return thread
+
+
+def _price_offer(
+    session: Session, agent: Agent, thread: Thread, draft: OfferDraft, *, final: bool
+) -> OfferPayload:
+    """Check the seller's draft against pricing.landed_cost and return the hashed offer.
+
+    qty is the quantity requested; the offer stores the billed quantity, whole packs.
+    The quote is on the current version of the thread's listing.
+    """
+    quoted = session.get(Listing, thread.listing_id)
+    listing = (
+        session.exec(
+            select(Listing).where(
+                Listing.store_id == quoted.store_id,
+                Listing.sku == quoted.sku,
+                Listing.is_current == True,  # noqa: E712
+            )
+        ).first()
+        if quoted is not None
+        else None
+    )
+    if listing is None or thread.ship_to is None:
+        raise DomainError(ErrorCode.INTERNAL, "thread is missing its listing", retryable=True)
+    if draft.ship_to is not None and draft.ship_to != thread.ship_to:
+        raise DomainError(ErrorCode.VALIDATION, f"ship_to must be {thread.ship_to}, as in the rfq")
+    if draft.currency != listing.currency:
+        raise DomainError(ErrorCode.VALIDATION, f"currency must be {listing.currency}")
+    if draft.unit_price < listing.price_floor:
+        raise DomainError(
+            ErrorCode.BELOW_FLOOR,
+            "unit_price is below this listing's price floor",
+            action="offer",
+            agent_id=agent.id,
+            detail={"thread_id": thread.id, "listing_id": listing.id},
+        )
+    landed = pricing.landed_cost(
+        as_priceable(listing), draft.qty, thread.ship_to, unit_price=draft.unit_price
+    )
+    if listing.stock < landed.qty_billed:
+        raise DomainError(
+            ErrorCode.OUT_OF_STOCK, f"{listing.stock} in stock, {landed.qty_billed} needed"
+        )
+    if quantize_money(draft.total) != quantize_money(landed.total) or _line_keys(
+        draft.lines
+    ) != _line_keys(landed.lines):
+        raise DomainError(
+            ErrorCode.VALIDATION,
+            f"lines and total must match the landed cost; the total is {landed.total}",
+        )
+
+    now = utc_now()
+    latest = now + timedelta(hours=get_settings().offer_ttl_hours)
+    expires_at = draft.expires_at or latest
+    if expires_at.tzinfo is None:
+        raise DomainError(ErrorCode.VALIDATION, "expires_at needs a timezone")
+    if not now < expires_at <= latest:
+        raise DomainError(
+            ErrorCode.VALIDATION,
+            f"expires_at must be within {get_settings().offer_ttl_hours} hours from now",
+        )
+    if draft.delivery_date < now.date():
+        raise DomainError(ErrorCode.VALIDATION, "delivery_date is in the past")
+
+    fingerprint = OfferFingerprint(
+        listing_id=listing.id or 0,
+        listing_version=listing.version,
+        lines=landed.lines,
+        unit_price=landed.unit_price,
+        qty=landed.qty_billed,
+        total=landed.total,
+        currency=landed.currency,
+        ship_to=thread.ship_to,
+        delivery_date=draft.delivery_date,
+        # The hash keeps whole seconds, so the stored value does too.
+        expires_at=expires_at.astimezone(UTC).replace(microsecond=0),
+        final=final,
+    )
+    return OfferPayload(**fingerprint.model_dump(), hash=offer_hash(fingerprint))
+
+
+def _line_keys(lines: list[CostLine]) -> list[tuple[str, str]]:
+    return [(line.kind, quantize_money(line.amount)) for line in lines]
 
 
 def _expire_if_stale(session: Session, thread: Thread) -> None:

@@ -1,17 +1,23 @@
+from datetime import timedelta
 from decimal import Decimal
 
-from sqlmodel import Session, select
+from sqlmodel import Session, col, select
 
-from trajano.domain import idempotency
+from trajano.db import utc_now
+from trajano.domain import idempotency, pricing
 from trajano.domain.errors import DomainError
 from trajano.models import Company, Listing, Store
 from trajano.schemas import (
+    Breakdown,
     ErrorCode,
+    ExclusionReason,
     ListingPublic,
     ListingSeller,
     ListingWrite,
     PriceableListing,
     PriceTier,
+    SearchExclusion,
+    SearchHit,
     SearchPage,
     SearchSpec,
     StoreView,
@@ -20,6 +26,7 @@ from trajano.schemas import (
 
 # length, destination, need-by, and quantity. Order is part of the error text.
 _REQUIRED_SEARCH = ("length_mm", "ship_to", "need_by", "qty")
+_EXACT = ("diameter", "material", "grade", "standard")
 
 
 def as_priceable(listing: Listing) -> PriceableListing:
@@ -46,7 +53,46 @@ def search(session: Session, spec: SearchSpec) -> SearchPage:
             ErrorCode.SPEC_INCOMPLETE,
             "missing " + ", ".join(missing),
         )
-    raise NotImplementedError("Augusto: catalog.search")
+    today = utc_now().date()
+    query = select(Listing).where(Listing.is_current == True)  # noqa: E712
+    for name in _EXACT:
+        wanted = getattr(spec, name)
+        if wanted is not None:
+            query = query.where(getattr(Listing, name) == wanted)
+    rows = session.exec(query.order_by(col(Listing.id))).all()
+
+    priced: list[tuple[Decimal, int, Listing, Breakdown]] = []
+    excluded: list[SearchExclusion] = []
+    for listing in rows:
+        if abs(Decimal(listing.length_mm) - spec.length_mm) > spec.length_tolerance_mm:
+            continue
+        billed = pricing.billed_qty(spec.qty, listing.pack_size)
+        arrives = today + timedelta(
+            days=listing.lead_time_days + pricing.transit_days(listing.ships_from, spec.ship_to)
+        )
+        reason: tuple[ExclusionReason, str] | None = None
+        if listing.moq > billed:
+            reason = (ExclusionReason.MOQ, f"minimum order is {listing.moq}")
+        elif listing.stock < billed:
+            reason = (ExclusionReason.STOCK, f"{listing.stock} in stock, {billed} needed")
+        elif arrives > spec.need_by:
+            reason = (ExclusionReason.DATE, f"earliest delivery is {arrives.isoformat()}")
+        if reason is not None:
+            excluded.append(
+                SearchExclusion(
+                    listing_id=listing.id or 0, sku=listing.sku, reason=reason[0], detail=reason[1]
+                )
+            )
+            continue
+        landed = pricing.landed_cost(as_priceable(listing), spec.qty, spec.ship_to)
+        priced.append((landed.total, listing.id or 0, listing, landed))
+
+    priced.sort(key=lambda row: (row[0], row[1]))
+    hits = [
+        SearchHit(listing=get_listing(session, listing_id), landed=landed, rank=rank)
+        for rank, (_total, listing_id, _listing, landed) in enumerate(priced, start=1)
+    ]
+    return SearchPage(hits=hits, excluded=excluded)
 
 
 def get_listing(session: Session, listing_id: int) -> ListingPublic:
