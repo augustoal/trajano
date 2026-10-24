@@ -463,16 +463,16 @@ def _apply(
     session.add(message)
     session.flush()
     if offer is not None:
-        row = Offer(
+        stored = Offer(
             thread_id=thread.id or 0,
             message_id=message.id or 0,
             **offer.model_dump(exclude={"listing_version", "lines"}),
             lines=[line.model_dump(mode="json") for line in offer.lines],
         )
-        session.add(row)
+        session.add(stored)
         session.flush()
-        # counter_offer and accept_offer take an offer_id; this is where a buyer reads it.
-        message.payload = {**stored_payload, "offer_id": row.id}
+        # The buyer needs the id to counter or accept. It is not part of the hash.
+        message.payload = {**message.payload, "offer_id": stored.id}
         session.add(message)
         session.flush()
 

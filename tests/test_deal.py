@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -187,9 +188,12 @@ def test_offer_refusals(session) -> None:
     listing = make_listing(session, store)
     thread_id = _rfq(session, buyer, listing)
 
+    keys = itertools.count()
+
     def code(draft: OfferDraft) -> ErrorCode:
+        # A fresh key per attempt: id() of a collected draft can be reused.
         with pytest.raises(DomainError) as exc:
-            _offer(session, seller, thread_id, draft, key=f"bad-{id(draft)}")
+            _offer(session, seller, thread_id, draft, key=f"bad-{next(keys)}")
         return exc.value.code
 
     good = _draft(listing)
@@ -348,3 +352,32 @@ def test_make_offer_tool(session, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert result["error"] is None
     assert result["status"] == "OFFERED"
+
+
+def test_the_buyer_can_accept_from_the_thread_view_alone(session) -> None:
+    seller, _key, store = make_seller(session)
+    buyer, _buyer_key = make_buyer(session)
+    listing = make_listing(session, store)
+    mandate = _mandate(session, buyer)
+    thread_id = _rfq(session, buyer, listing)
+    _offer(session, seller, thread_id, _draft(listing))
+
+    view = get_thread(session, buyer, thread_id)
+    [message] = [m for m in view.messages if m.type is MessageType.OFFER]
+    stored = _latest_offer(session, thread_id)
+    assert message.payload["offer_id"] == stored.id
+    assert message.payload["hash"] == stored.hash
+
+    accepted = send(
+        session,
+        buyer,
+        message_type=MessageType.ACCEPT,
+        payload=AcceptPayload(
+            offer_id=message.payload["offer_id"],
+            hash=message.payload["hash"],
+            mandate=mandate,
+            idempotency_key="from-view",
+        ),
+        idempotency_key="from-view",
+    )
+    assert accepted.order_id is not None
