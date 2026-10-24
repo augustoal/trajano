@@ -6,13 +6,10 @@ from typing import Any
 import httpx
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from sqlmodel import Session, col, select
 
 from eval import run as eval_run
 from eval.solver import load_tasks, solve
-from trajano.db import get_engine
 from trajano.domain.pricing import landed_cost
-from trajano.models import Offer
 from trajano.schemas import PriceableListing, PriceTier
 
 
@@ -73,16 +70,6 @@ async def list_price_sellers(base_url: str, seller_keys: dict[str, str]) -> None
     await asyncio.gather(*(seller(key) for key in seller_keys.values()))
 
 
-def _offer_id(thread_id: int) -> int:
-    # Stand-in: the buyer tools do not expose the offer id yet (see PR #12 notes).
-    with Session(get_engine()) as session:
-        offer = session.exec(
-            select(Offer).where(Offer.thread_id == thread_id).order_by(col(Offer.id).desc())
-        ).first()
-        assert offer is not None
-        return offer.id or 0
-
-
 def cheapest_buyer(*, qty_factor: int = 1):  # noqa: ANN201
     """Search, take the cheapest hit within the mandate, request a quote, accept it."""
 
@@ -117,7 +104,7 @@ def cheapest_buyer(*, qty_factor: int = 1):  # noqa: ANN201
             offer = next(m for m in reversed(thread["messages"]) if m["type"] == "offer")
             await call(
                 "accept_offer",
-                offer_id=_offer_id(thread_id),
+                offer_id=offer["payload"]["offer_id"],
                 offer_hash=offer["payload"]["hash"],
                 mandate=mandate,
                 idempotency_key="accept",
