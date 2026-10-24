@@ -1,0 +1,13 @@
+seller: Atlantic Hardware
+min_margin_percent: 6
+volume_discounts:
+  - {min_qty: 2500, percent: 2}
+counter:
+  max_discount_percent: 4
+  meet_at_limit: true
+# Short-lived quotes. Must not exceed the server's offer TTL (48 hours).
+offer_ttl_hours: 24
+orders:
+  confirm: true
+  ship: true
+  deliver: true

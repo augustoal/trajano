@@ -1,0 +1,18 @@
+# Confidential pricing rules for the rule seller. The server only knows the
+# listing price_floor; everything here stays inside the seller agent.
+seller: Midwest Fastener Supply
+# Never quote below price_floor * (1 + min_margin_percent / 100).
+min_margin_percent: 4
+# Extra discount off the tier price for large orders, on the billed quantity.
+volume_discounts:
+  - {min_qty: 2000, percent: 2}
+  - {min_qty: 5000, percent: 4}
+counter:
+  # A counter at or above opening price * (1 - max_discount_percent / 100) is met.
+  max_discount_percent: 6
+  # Below that: true sends a final offer at the limit, false declines.
+  meet_at_limit: true
+orders:
+  confirm: true
+  ship: true
+  deliver: true

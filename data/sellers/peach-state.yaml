@@ -1,0 +1,11 @@
+seller: Peach State Fasteners
+min_margin_percent: 5
+volume_discounts:
+  - {min_qty: 1000, percent: 1}
+counter:
+  max_discount_percent: 5
+  meet_at_limit: false
+orders:
+  confirm: true
+  ship: true
+  deliver: true
