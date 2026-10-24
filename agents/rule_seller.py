@@ -345,14 +345,16 @@ async def handle(
     try:
         await _execute(client, thread_id, action, key)
     except ToolCallError as exc:
-        stats[f"error:{exc.code}"] += 1
         logger.info("thread %s: %s refused: %s", thread_id, action["action"], exc)
         if action["action"] == "offer" and exc.code == "OUT_OF_STOCK":
+            # Another buyer took the stock between our read and the offer.
+            stats["stock_race"] += 1
             await _execute(
                 client, thread_id, DeclineAction(action="decline", reason_code="OUT_OF_STOCK"), key
             )
             stats["decline"] += 1
             return True
+        stats[f"error:{exc.code}"] += 1
         return False
     stats[action["action"]] += 1
     return True

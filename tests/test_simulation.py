@@ -1,6 +1,7 @@
 """End to end: scripted buyers and rule sellers negotiate over real MCP HTTP."""
 
 import asyncio
+import json
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -278,3 +279,102 @@ def test_client_raises_structured_errors(server, session) -> None:
 
     with pytest.raises(ToolCallError, match="UNAUTHORIZED"):
         asyncio.run(bad_key())
+
+
+class _Block:
+    def __init__(self, **fields: object) -> None:
+        self.__dict__.update(fields)
+
+
+class _ScriptedModel:
+    """Stands in for the Messages API: a fixed buy, reading ids from earlier tool results."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict] = []
+
+    async def create(self, **kwargs: object) -> _Block:
+        self.requests.append(kwargs)
+        results = [
+            json.loads(block["content"])
+            for message in kwargs["messages"]  # type: ignore[union-attr]
+            if message["role"] == "user" and isinstance(message["content"], list)
+            for block in message["content"]
+            if block["content"] != "ok"
+        ]
+        step = len(self.requests)
+        if step == 1:
+            return self._use(
+                "search_listings",
+                {k: SPEC[k] for k in ("qty", "ship_to", "need_by", "length_mm", "grade")},
+            )
+        if step == 2:
+            hit = results[-1]["hits"][0]["listing"]["id"]
+            return self._use(
+                "request_quote",
+                {
+                    **{k: SPEC[k] for k in ("qty", "ship_to", "need_by")},
+                    "listing_id": hit,
+                    "idempotency_key": "llm-rfq",
+                },
+            )
+        if step == 3:
+            return self._use("wait", {"seconds": 1})
+        if step == 4:
+            return self._use("get_thread", {"thread_id": results[-1]["thread_id"]})
+        if step == 5:
+            offer = results[-1]["thread"]["messages"][-1]["payload"]
+            return self._use(
+                "accept_offer",
+                {
+                    "offer_id": offer["offer_id"],
+                    "offer_hash": offer["hash"],
+                    "mandate": {"forged": True},
+                    "idempotency_key": "llm-acc",
+                },
+            )
+        return self._use(
+            "finish",
+            {"status": "ordered", "order_id": results[-1]["order_id"], "summary": "bought"},
+        )
+
+    def _use(self, name: str, arguments: dict) -> _Block:
+        block = _Block(type="tool_use", id=f"t{len(self.requests)}", name=name, input=arguments)
+        return _Block(stop_reason="tool_use", content=[block])
+
+
+def test_llm_agent_loop_over_mcp_with_a_scripted_model(server, session, tmp_path) -> None:
+    from agents import llm_agent, rule_seller
+
+    market = _market(session)
+    buyer, key = make_buyer(session, "Claude")
+    mandate = _mandate(session, buyer)
+    session.commit()
+    model = _ScriptedModel()
+
+    async def scenario() -> dict:
+        stop = asyncio.Event()
+        rules = rule_seller.SellerRules.model_validate(CHEAP_RULES)
+        seller = asyncio.create_task(
+            rule_seller.run(
+                server, market["sellers"][0]["api_key"], rules, stop=stop, poll_seconds=0.05
+            )
+        )
+        task = {"id": "llm-1", "spec": SPEC, "mandate": mandate}
+        result = await llm_agent.run(server, key, "buyer", task, messages_api=model)
+        stop.set()
+        await seller
+        return result
+
+    result = asyncio.run(scenario())
+
+    assert result["status"] == "ordered"
+    assert result["tool_errors"] == []
+    names = {tool["name"] for tool in model.requests[0]["tools"]}
+    assert {"search_listings", "accept_offer", "wait", "finish"} <= names
+    assert model.requests[0]["model"] == llm_agent.DEFAULT_MODEL
+    brief = model.requests[0]["messages"][0]["content"]
+    assert "max_total" in brief and mandate["signature"] not in brief
+    with Session(get_engine()) as db:
+        order = db.get(Order, result["order_id"])
+        # The forged mandate the model passed was replaced by the signed one.
+        assert order is not None and order.mandate_id == mandate["id"]

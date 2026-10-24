@@ -100,6 +100,27 @@ class TrajanoClient:
             await asyncio.sleep(0.05 * 2**attempt)
         raise AssertionError("unreachable")
 
+    async def body(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """One call, no retry, errors returned in the body. For an LLM that reads the error."""
+        if self._session is None:
+            raise RuntimeError("use TrajanoClient as an async context manager")
+        result = await self._session.call_tool(tool, _jsonable(arguments))
+        return _body(result)
+
+    async def tools(self) -> list[dict[str, Any]]:
+        """name, description, and JSON input schema of every tool on this server."""
+        if self._session is None:
+            raise RuntimeError("use TrajanoClient as an async context manager")
+        listed = await self._session.list_tools()
+        return [
+            {
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": tool.inputSchema,
+            }
+            for tool in listed.tools
+        ]
+
     async def get_inbox(self, since: str | None = None) -> list[dict[str, Any]]:
         return (await self.call("get_inbox", since=since))["threads"]
 
