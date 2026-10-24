@@ -1,0 +1,13 @@
+seller: Gulf Industrial
+# Volume player: cheap on big orders, flexible on counters.
+min_margin_percent: 2
+volume_discounts:
+  - {min_qty: 1000, percent: 3}
+  - {min_qty: 5000, percent: 6}
+counter:
+  max_discount_percent: 10
+  meet_at_limit: true
+orders:
+  confirm: true
+  ship: true
+  deliver: true

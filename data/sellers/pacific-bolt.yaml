@@ -1,0 +1,11 @@
+seller: Pacific Bolt Co
+# Premium, fast shipper: holds its price.
+min_margin_percent: 10
+volume_discounts: []
+counter:
+  max_discount_percent: 2
+  meet_at_limit: false
+orders:
+  confirm: true
+  ship: true
+  deliver: true
