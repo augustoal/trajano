@@ -48,7 +48,9 @@ _REJECTED = "REJECTED"
 
 class Brief(TypedDict):
     condition: str
+    # A: the storefront. B: the buyer MCP endpoint. base_url is the server root.
     url: str
+    base_url: str
     api_key: str
     task: dict[str, Any]
     mandate: dict[str, Any]
@@ -114,6 +116,7 @@ def run_task(
             brief = Brief(
                 condition=condition,
                 url=f"{base_url}/mcp/buyer/" if condition == "B" else f"{base_url}/",
+                base_url=base_url,
                 api_key=account["api_key"],
                 task={key: task[key] for key in ("id", "spec", "note") if key in task},
                 mandate=account["mandate"],
@@ -204,15 +207,18 @@ async def llm_buyer(brief: Brief) -> dict[str, Any]:
     from agents import llm_agent
 
     task = {**brief["task"], "condition": brief["condition"], "mandate": brief["mandate"]}
-    return await llm_agent.run(brief["url"], brief["api_key"], "buyer", task)
+    # llm_agent connects to {root}/mcp/{role}/ itself, so it takes the server root.
+    return await llm_agent.run(brief["base_url"], brief["api_key"], "buyer", task)
 
 
 async def llm_sellers(base_url: str, seller_keys: dict[str, str]) -> None:
     from agents import llm_agent
 
-    url = f"{base_url}/mcp/seller/"
     await asyncio.gather(
-        *(llm_agent.run(url, key, "seller", {"name": name}) for name, key in seller_keys.items())
+        *(
+            llm_agent.run(base_url, key, "seller", {"name": name})
+            for name, key in seller_keys.items()
+        )
     )
 
 

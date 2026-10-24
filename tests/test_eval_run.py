@@ -222,3 +222,26 @@ def test_rows_feed_the_report(tmp_path) -> None:
     [summary] = summarize([row], answer_key())
     assert summary["completion"] == 1.0
     assert summary["mean_price_gap_pct"] == 0.0
+
+
+def test_llm_adapters_pass_the_server_root(monkeypatch) -> None:
+    from agents import llm_agent
+
+    seen: list[str] = []
+
+    async def fake_run(url: str, api_key: str, role: str, task: dict) -> dict:
+        seen.append(f"{role} {url}")
+        return {"status": "ordered"}
+
+    monkeypatch.setattr(llm_agent, "run", fake_run)
+    brief = eval_run.Brief(
+        condition="B",
+        url="http://x/mcp/buyer/",
+        base_url="http://x",
+        api_key="k",
+        task={},
+        mandate={},
+    )
+    asyncio.run(eval_run.llm_buyer(brief))
+    asyncio.run(eval_run.llm_sellers("http://x", {"S": "k"}))
+    assert seen == ["buyer http://x", "seller http://x"]
