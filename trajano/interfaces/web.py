@@ -1,3 +1,4 @@
+import json
 import uuid
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -16,15 +17,19 @@ from trajano.db import get_settings
 from trajano.domain import accounts, catalog, mandates, negotiation
 from trajano.domain.accounts import authenticate, require_role
 from trajano.domain.errors import DomainError
-from trajano.interfaces.support import attempt
+from trajano.interfaces.support import attempt, parse
 from trajano.models import Agent
 from trajano.schemas import (
+    AcceptPayload,
+    CounterPayload,
     ErrorCode,
     MessageType,
     QuestionPayload,
     RfqPayload,
     Role,
     SearchSpec,
+    WithdrawPayload,
+    WithdrawReason,
 )
 
 COOKIE = "trajano_api_key"
@@ -142,8 +147,8 @@ def ask(
     idempotency_key: Annotated[str, Form()],
 ) -> Response:
     def work(session: Session, agent: Agent) -> object:
-        payload = _payload(QuestionPayload, listing_id=listing_id, text=text)
-        negotiation.send(
+        payload = parse(QuestionPayload, listing_id=listing_id, text=text)
+        sent = negotiation.send(
             session,
             agent,
             message_type=MessageType.QUESTION,
@@ -152,7 +157,7 @@ def ask(
             listing_id=listing_id,
             text=payload.text,
         )
-        return catalog.get_listing(session, listing_id)
+        return _to_thread(sent.thread_id)
 
     return _buyer_page(request, "listing.html", work)
 
@@ -167,14 +172,14 @@ def request_quote_form(
     idempotency_key: Annotated[str, Form()],
 ) -> Response:
     def work(session: Session, agent: Agent) -> object:
-        payload = _payload(
+        payload = parse(
             RfqPayload,
             listing_id=listing_id,
             qty=qty,
             ship_to=ship_to,
             need_by=need_by,
         )
-        negotiation.send(
+        sent = negotiation.send(
             session,
             agent,
             message_type=MessageType.RFQ,
@@ -182,7 +187,7 @@ def request_quote_form(
             idempotency_key=idempotency_key,
             listing_id=listing_id,
         )
-        return catalog.get_listing(session, listing_id)
+        return _to_thread(sent.thread_id)
 
     return _buyer_page(request, "listing.html", work)
 
@@ -200,7 +205,91 @@ def thread_page(request: Request, thread_id: int) -> Response:
     def work(session: Session, agent: Agent) -> object:
         return negotiation.get_thread(session, agent, thread_id)
 
-    return _buyer_page(request, "thread.html", work)
+    return _buyer_page(request, "thread.html", work, extra=_thread_forms())
+
+
+@router.post("/threads/{thread_id}/counter")
+def counter(
+    request: Request,
+    thread_id: int,
+    offer_id: Annotated[int, Form()],
+    idempotency_key: Annotated[str, Form()],
+    unit_price: Annotated[str, Form()] = "",
+    qty: Annotated[str, Form()] = "",
+) -> Response:
+    def work(session: Session, agent: Agent) -> object:
+        payload = parse(
+            CounterPayload,
+            offer_id=offer_id,
+            unit_price=unit_price.strip() or None,
+            qty=qty.strip() or None,
+        )
+        sent = negotiation.send(
+            session,
+            agent,
+            message_type=MessageType.COUNTER,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            thread_id=thread_id,
+        )
+        return _to_thread(sent.thread_id)
+
+    return _buyer_page(request, "thread.html", work, extra=_thread_forms())
+
+
+@router.post("/threads/{thread_id}/accept")
+def accept(
+    request: Request,
+    thread_id: int,
+    offer_id: Annotated[int, Form()],
+    offer_hash: Annotated[str, Form()],
+    mandate: Annotated[str, Form()],
+    idempotency_key: Annotated[str, Form()],
+) -> Response:
+    def work(session: Session, agent: Agent) -> object:
+        try:
+            document = json.loads(mandate)
+        except json.JSONDecodeError as exc:
+            raise DomainError(ErrorCode.VALIDATION, "mandate must be the signed JSON") from exc
+        payload = parse(
+            AcceptPayload,
+            offer_id=offer_id,
+            hash=offer_hash.strip(),
+            mandate=document,
+            idempotency_key=idempotency_key,
+        )
+        sent = negotiation.send(
+            session,
+            agent,
+            message_type=MessageType.ACCEPT,
+            payload=payload,
+            idempotency_key=idempotency_key,
+        )
+        return _to_thread(sent.thread_id)
+
+    return _buyer_page(request, "thread.html", work, extra=_thread_forms())
+
+
+@router.post("/threads/{thread_id}/withdraw")
+def withdraw(
+    request: Request,
+    thread_id: int,
+    reason_code: Annotated[str, Form()],
+    idempotency_key: Annotated[str, Form()],
+) -> Response:
+    def work(session: Session, agent: Agent) -> object:
+        payload = parse(WithdrawPayload, reason_code=reason_code)
+        sent = negotiation.send(
+            session,
+            agent,
+            message_type=MessageType.WITHDRAW,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            thread_id=thread_id,
+        )
+        return _to_thread(sent.thread_id)
+
+    return _buyer_page(request, "thread.html", work, extra=_thread_forms())
 
 
 @router.get("/owner")
@@ -301,8 +390,17 @@ def _page(
         if isinstance(viewer, str):
             context["agent_name"] = viewer
         listing_id = request.path_params.get("listing_id")
+        thread_id = request.path_params.get("thread_id")
         if listing_id is not None and outcome.error.code is not ErrorCode.NOT_FOUND:
             loaded = attempt(lambda session: catalog.get_listing(session, int(listing_id)))
+            if loaded.error is None:
+                context["result"] = loaded.value
+        if thread_id is not None and outcome.error.code is not ErrorCode.NOT_FOUND:
+            loaded = attempt(
+                lambda session: negotiation.get_thread(
+                    session, authenticate(session, key), int(thread_id)
+                )
+            )
             if loaded.error is None:
                 context["result"] = loaded.value
         context["error"] = outcome.error.message
@@ -310,6 +408,8 @@ def _page(
         status = 404 if outcome.error.code is ErrorCode.NOT_FOUND else 400
         return TEMPLATES.TemplateResponse(request, template, context, status_code=status)
     agent, result = outcome.value  # type: ignore[misc]
+    if isinstance(result, Response):
+        return result
     context["agent_name"] = agent.name
     context["result"] = result
     return TEMPLATES.TemplateResponse(request, template, context)
@@ -373,11 +473,18 @@ def _spec_from_query(request: Request) -> SearchSpec:
         raise DomainError(ErrorCode.VALIDATION, "search filters are invalid") from exc
 
 
-def _payload[T](model: type[T], **data: object) -> T:
-    try:
-        return model(**data)  # type: ignore[arg-type]
-    except ValidationError as exc:
-        raise DomainError(ErrorCode.VALIDATION, "that form is not valid") from exc
+def _to_thread(thread_id: int) -> Response:
+    # Redirect after a write, so a reload never resubmits the form.
+    return RedirectResponse(f"/threads/{thread_id}", status_code=303)
+
+
+def _thread_forms() -> dict[str, object]:
+    return {
+        "counter_key": str(uuid.uuid4()),
+        "accept_key": str(uuid.uuid4()),
+        "withdraw_key": str(uuid.uuid4()),
+        "withdraw_reasons": [reason.value for reason in WithdrawReason],
+    }
 
 
 def _safe_next(value: str) -> str:

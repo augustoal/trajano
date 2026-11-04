@@ -2,18 +2,80 @@
 {% block title %}Thread · Trajano{% endblock %}
 {% block body %}
 {% if result %}
+  {% set actions = result.next_actions | map(attribute="value") | list %}
+  {% set latest = namespace(offer=None) %}
+  {% for message in result.messages %}
+    {% if message.type.value == "offer" %}{% set latest.offer = message.payload %}{% endif %}
+  {% endfor %}
   <h1>Thread {{ result.id }}</h1>
-  <p class="muted">{{ result.status.value }} · round {{ result.rounds_used }}</p>
+  <p class="muted">
+    <a href="/listing/{{ result.listing_id }}">Listing {{ result.listing_id }}</a>
+    · {{ result.status.value }} · round {{ result.rounds_used }}
+  </p>
   {% if result.qty %}<p>Quantity {{ result.qty }} to {{ result.ship_to }}, needed {{ result.need_by }}.</p>{% endif %}
-  <p>You can: {% for action in result.next_actions %}{{ action.value }}{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  <p>You can: {% for action in actions %}{{ action }}{% if not loop.last %}, {% endif %}{% else %}nothing, it is not your turn{% endfor %}</p>
+  <h2>Messages</h2>
   <ol>
     {% for message in result.messages %}
       <li>
-        <strong>{{ message.type.value }}</strong>
-        {% if message.text %}<span class="untrusted">{{ message.text }}</span>{% endif %}
+        <strong>{{ message.type.value }}</strong> <span class="muted">{{ message.created_at }}</span>
+        {% if message.payload %}
+          <table>
+            <tbody>
+              {% for name, value in message.payload.items() if name != "lines" %}
+                <tr><th>{{ name }}</th><td>{{ value }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% if message.payload.lines %}
+            <table>
+              <thead><tr><th>Line</th><th>Description</th><th>Amount</th></tr></thead>
+              <tbody>
+                {% for line in message.payload.lines %}
+                  <tr><td>{{ line.kind }}</td><td>{{ line.description }}</td><td>{{ line.amount }}</td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% endif %}
+        {% endif %}
+        {% if message.text %}<p class="untrusted">{{ message.text }}</p>{% endif %}
       </li>
     {% endfor %}
   </ol>
+  {% if latest.offer and "accept" in actions %}
+    <h2>Accept offer {{ latest.offer.offer_id }}</h2>
+    <p>Total {{ latest.offer.total }} {{ latest.offer.currency }}, delivered {{ latest.offer.delivery_date }}, valid until {{ latest.offer.expires_at }}.</p>
+    <form method="post" action="/threads/{{ result.id }}/accept">
+      <input type="hidden" name="idempotency_key" value="{{ accept_key }}">
+      <input type="hidden" name="offer_id" value="{{ latest.offer.offer_id }}">
+      <input type="hidden" name="offer_hash" value="{{ latest.offer.hash }}">
+      <label>Signed mandate (JSON) <textarea name="mandate" rows="6" cols="60" required></textarea></label>
+      <p><button type="submit">Accept offer</button></p>
+    </form>
+  {% endif %}
+  {% if latest.offer and "counter" in actions %}
+    <h2>Counter offer {{ latest.offer.offer_id }}</h2>
+    <p class="muted">One counter per thread. Change the unit price, the quantity, or both.</p>
+    <form method="post" action="/threads/{{ result.id }}/counter">
+      <input type="hidden" name="idempotency_key" value="{{ counter_key }}">
+      <input type="hidden" name="offer_id" value="{{ latest.offer.offer_id }}">
+      <label>Unit price <input name="unit_price" inputmode="decimal"></label>
+      <label>Quantity <input name="qty" inputmode="numeric"></label>
+      <p><button type="submit">Send counter</button></p>
+    </form>
+  {% endif %}
+  {% if "withdraw" in actions %}
+    <h2>Withdraw</h2>
+    <form method="post" action="/threads/{{ result.id }}/withdraw">
+      <input type="hidden" name="idempotency_key" value="{{ withdraw_key }}">
+      <label>Reason
+        <select name="reason_code">
+          {% for reason in withdraw_reasons %}<option value="{{ reason }}">{{ reason }}</option>{% endfor %}
+        </select>
+      </label>
+      <p><button type="submit">Withdraw</button></p>
+    </form>
+  {% endif %}
 {% else %}
   <h1>Thread</h1>
 {% endif %}
