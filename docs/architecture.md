@@ -60,6 +60,7 @@ trajano/
 │   ├── rule_seller.py        # deterministic seller with pricing rules in YAML
 │   ├── scripted_buyer.py     # deterministic buyer for e2e tests
 │   ├── llm_agent.py          # generic LLM agent (role + task + mandate)
+│   ├── browser.py            # text browser over the storefront, for condition A
 │   └── simulate.py           # launches N buyers + M sellers in parallel
 ├── data/
 │   ├── seed.py               # generates 5 sellers and ~200 bolt listings
@@ -232,12 +233,12 @@ The storefront requires login with an API key stored in a cookie, so that in con
 
 The same agent (`llm_agent.py`), with the same catalog and the same rules, buys in two ways:
 
-- **A, the status quo:** browses the HTML storefront with a browser (for example Playwright MCP).
+- **A, the status quo:** browses the HTML storefront with a text browser (`agents/browser.py`: open a page, submit a form). Hidden fields ride along as in a real browser, and the signed mandate is filled into the accept form for the model, just as `accept_offer` gets it attached in B.
 - **B, Trajano:** uses the buyer MCP tools.
 
-In both conditions the agent can ask questions and request quotes: in A through forms and in B through tools, but both create the same typed thread and the seller responds the same way. The injection test goes in `seller_notes` and appears in both interfaces.
+In both conditions the agent can ask questions, request quotes, counter, accept and withdraw: in A through forms on the listing and thread pages and in B through tools, but both create the same typed thread and the seller responds the same way. In A the agent pastes its signed mandate into the accept form; in B it passes it to `accept_offer`. The injection test goes in `seller_notes` and appears in both interfaces.
 
-**Metrics:** completion, constraint violations, price gap against the solver, latency and cost per valid purchase, over 3 runs.
+**Metrics:** completion, constraint violations, price gap against the solver, latency and cost per valid purchase, over 3 runs, plus the spread of completion across runs, tool calls, tokens, and how often the agent's own status disagrees with the database. The sellers are the rule sellers, so only the buyer varies. Tasks are split into 20 `tune` and 10 `fresh` (about a third of each kind, chosen before any LLM run): changes are made looking only at `tune`, and `fresh` checks them.
 
 **Claude Desktop or ChatGPT** connect to the same MCP and are used for the demo. The evaluation uses our own agent because it can be automated and produces complete logs.
 

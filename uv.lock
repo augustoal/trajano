@@ -1230,6 +1230,7 @@ dev = [
 ]
 llm = [
     { name = "anthropic" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
@@ -1251,7 +1252,10 @@ dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "ruff", specifier = ">=0.8" },
 ]
-llm = [{ name = "anthropic", specifier = ">=2.3.0" }]
+llm = [
+    { name = "anthropic", specifier = ">=2.3.0" },
+    { name = "python-dotenv", specifier = ">=1.0" },
+]
 
 [[package]]
 name = "truststore"

@@ -9,3 +9,6 @@ build/
 .mypy_cache/
 .python-version
 seed_keys.json
+.env
+.env.*
+!.env.example
