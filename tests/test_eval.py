@@ -1,4 +1,5 @@
 import json
+import statistics
 from collections import Counter
 from decimal import Decimal
 
@@ -116,3 +117,48 @@ def test_report_scores_validity_gap_and_cost(tmp_path, capsys) -> None:
     main([str(path), "--csv", str(tmp_path / "report.csv")])
     assert "| B | 2 | 1.0 |" in capsys.readouterr().out
     assert (tmp_path / "report.csv").read_text().startswith("condition,runs")
+
+
+def test_fresh_tasks_cover_every_kind() -> None:
+    tasks = load_tasks()
+    assert {task["split"] for task in tasks} == {"tune", "fresh"}
+    fresh = [task for task in tasks if task["split"] == "fresh"]
+    assert len(fresh) == 10
+    kinds = {task["kind"] for task in tasks}
+    assert {task["kind"] for task in fresh} == kinds
+    assert {task["kind"] for task in tasks if task["split"] == "tune"} == kinds
+
+
+def test_report_by_kind_spread_calls_and_claims(tmp_path, capsys) -> None:
+    answers = answer_key()
+    feasible = next(task_id for task_id, answer in answers.items() if answer["feasible"])
+    best = answers[feasible]["best"]["total"]
+
+    def row(run: int, bought: bool, claimed: str, kind: str = "basic") -> dict:
+        return {
+            "task_id": feasible, "kind": kind, "split": "fresh", "condition": "A", "run": run,
+            "order_total": best if bought else None, "violations": [], "latency_s": 1,
+            "cost_usd": 0.1, "claimed_status": claimed, "tool_calls": 10 * run,
+            "input_tokens": 1000, "cache_write_tokens": 100, "cache_read_tokens": 0,
+            "output_tokens": 50,
+        }  # fmt: skip
+
+    results = [row(1, True, "ordered"), row(2, False, "ordered"), row(3, True, "ordered", "moq")]
+    [overall] = summarize(results, answers)
+    assert overall["completion"] == round(2 / 3, 3)
+    assert overall["completion_sd"] == round(statistics.stdev([1.0, 0.0, 1.0]), 3)
+    assert overall["mean_tool_calls"] == 20
+    assert overall["mean_input_tokens"] == 1100
+    assert overall["mean_output_tokens"] == 50
+    # Run 2 claimed an order the database does not have.
+    assert overall["claim_mismatch_rate"] == round(1 / 3, 3)
+    by_kind = {item["kind"]: item for item in summarize(results, answers, by_kind=True)}
+    assert by_kind["basic"]["runs"] == 2 and by_kind["moq"]["completion"] == 1.0
+
+    path = tmp_path / "results.jsonl"
+    path.write_text("\n".join(json.dumps(item) for item in results) + "\n")
+    main([str(path), "--by-kind", "--split", "tune"])
+    assert "| A |" not in capsys.readouterr().out
+    main([str(path), "--by-kind", "--split", "fresh"])
+    out = capsys.readouterr().out
+    assert "| condition | kind |" in out and "| A | moq | 1 |" in out

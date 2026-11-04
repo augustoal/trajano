@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+import pytest
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -156,6 +157,37 @@ def test_a_crashing_or_slow_buyer_is_recorded() -> None:
     assert slow["order_total"] is None
 
 
+async def chatty_staller(brief: eval_run.Brief) -> dict[str, Any]:
+    brief["transcript"].append({"turn": 1, "text": "looking", "calls": []})
+    await asyncio.sleep(5)
+    return {}
+
+
+def test_main_writes_a_transcript_per_run_even_when_the_buyer_times_out(tmp_path) -> None:
+    out = tmp_path / "results.jsonl"
+    eval_run.main(
+        [
+            *("--tasks", "t01", "--conditions", "A,B", "--runs", "1", "--timeout", "0.2"),
+            *("--out", str(out), "--buyer", "tests.test_eval_run:chatty_staller"),
+            *("--sellers", "tests.test_eval_run:idle_sellers"),
+        ]
+    )
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    lines = eval_run.transcript_path(out).read_text().splitlines()
+    transcripts = [json.loads(line) for line in lines]
+    assert eval_run.transcript_path(out).name == "results.transcripts.jsonl"
+    assert [(row["condition"], "timed out" in row["error"]) for row in rows] == [
+        ("A", True),
+        ("B", True),
+    ]
+    assert [(t["task_id"], t["condition"], t["run"]) for t in transcripts] == [
+        ("t01", "A", 1),
+        ("t01", "B", 1),
+    ]
+    assert transcripts[0]["turns"] == [{"turn": 1, "text": "looking", "calls": []}]
+    assert "turns" not in rows[0]
+
+
 def test_storefront_runs_get_the_site_url() -> None:
     seen: dict[str, str] = {}
 
@@ -229,7 +261,7 @@ def test_llm_adapters_pass_the_server_root(monkeypatch) -> None:
 
     seen: list[str] = []
 
-    async def fake_run(url: str, api_key: str, role: str, task: dict) -> dict:
+    async def fake_run(url: str, api_key: str, role: str, task: dict, **_: Any) -> dict:
         seen.append(f"{role} {url}")
         return {"status": "ordered"}
 
@@ -241,7 +273,47 @@ def test_llm_adapters_pass_the_server_root(monkeypatch) -> None:
         api_key="k",
         task={},
         mandate={},
+        transcript=[],
     )
     asyncio.run(eval_run.llm_buyer(brief))
     asyncio.run(eval_run.llm_sellers("http://x", {"S": "k"}))
     assert seen == ["buyer http://x", "seller http://x"]
+
+
+def test_rows_keep_the_buyers_own_report_apart_from_the_score() -> None:
+    async def talker(brief: eval_run.Brief) -> dict[str, Any]:
+        tokens = {
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "cache_creation_input_tokens": 3,
+            "cache_read_input_tokens": 4,
+        }
+        return {
+            "status": "ordered",
+            "tool_calls": 7,
+            "tool_errors": ["STALE_OFFER"],
+            "usage": {"claude-opus-5-5": tokens, "claude-sonnet-5-5": tokens},
+            "cost_usd": 0.02,
+        }
+
+    task = _task("t01")
+    row = eval_run.run_task(task, "A", 2, buyer=talker, sellers=idle_sellers)
+    assert (row["kind"], row["split"], row["run"]) == (task["kind"], task["split"], 2)
+    # It says it ordered; the score only trusts the database.
+    assert row["claimed_status"] == "ordered" and row["order_total"] is None
+    assert (row["tool_calls"], row["tool_errors"]) == (7, ["STALE_OFFER"])
+    assert (row["input_tokens"], row["output_tokens"]) == (20, 4)
+    assert (row["cache_write_tokens"], row["cache_read_tokens"]) == (6, 8)
+
+
+def test_rule_sellers_serve_a_purchase() -> None:
+    row = eval_run.run_task(
+        _task("t01"), "B", 1, buyer=cheapest_buyer(), sellers=eval_run.rule_sellers, timeout_s=60
+    )
+    assert row["error"] is None
+    assert row["violations"] == [] and row["order_total"] is not None
+
+
+def test_rule_sellers_need_rules_for_every_seller() -> None:
+    with pytest.raises(ValueError, match="Nobody"):
+        asyncio.run(eval_run.rule_sellers("http://x", {"Nobody": "k"}))

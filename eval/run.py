@@ -2,14 +2,19 @@
 
 Each run gets a fresh database with the seeded catalog, a clock frozen at the
 task's morning, one buyer with its signed mandate, and a live server on a
-local port. The sellers run alongside the buyer until it finishes. The run is
-scored from the orders actually in the database, then written as one JSON
-line in the format eval.report reads.
+local port. The sellers run alongside the buyer until it finishes: by default
+the deterministic rule sellers, so the buyer is the only thing that varies.
+The run is scored from the orders actually in the database, then written as
+one JSON line in the format eval.report reads, next to what the buyer reported
+about itself (status, tool calls, tokens), which is never used to score it.
 
-    uv run python -m eval.run --conditions B --runs 3 --out results.jsonl
+    uv run python -m eval.run --conditions A,B --runs 3 --split tune --out results.jsonl
 
 --buyer and --sellers take "module:function". A buyer is
-`async (brief) -> {"cost_usd": float}`; sellers are
+`async (brief) -> report | None`, where the report may carry status, cost_usd,
+tool_calls, tool_errors and usage ({model: {token field: count}}), and may append
+its turns to brief["transcript"]; main writes them to <out>.transcripts.jsonl,
+one line per run, as the evidence behind each row. Sellers are
 `async (base_url, seller_keys) -> None` and are cancelled when the buyer is done.
 """
 
@@ -42,6 +47,14 @@ from trajano.config import reset_settings
 from trajano.db import freeze_clock, get_engine, init_db, reset_clock, reset_engine
 
 CONDITIONS = ("A", "B")
+SPLITS = ("tune", "fresh")
+# Report fields summed over models, under the names the result rows use.
+_TOKENS = {
+    "input_tokens": "input_tokens",
+    "output_tokens": "output_tokens",
+    "cache_creation_input_tokens": "cache_write_tokens",
+    "cache_read_input_tokens": "cache_read_tokens",
+}
 _ATTRIBUTES = ("diameter", "material", "grade", "standard")
 _REJECTED = "REJECTED"
 
@@ -54,6 +67,8 @@ class Brief(TypedDict):
     api_key: str
     task: dict[str, Any]
     mandate: dict[str, Any]
+    # The buyer appends its turns here; whatever it wrote survives a timeout or crash.
+    transcript: list[dict[str, Any]]
 
 
 Buyer = Callable[[Brief], Awaitable[dict[str, Any] | None]]
@@ -103,6 +118,7 @@ def run_task(
     buyer: Buyer,
     sellers: Sellers,
     timeout_s: float = 600,
+    transcript: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if condition not in CONDITIONS:
         raise ValueError(f"condition must be one of {CONDITIONS}")
@@ -120,6 +136,7 @@ def run_task(
                 api_key=account["api_key"],
                 task={key: task[key] for key in ("id", "spec", "note") if key in task},
                 mandate=account["mandate"],
+                transcript=[] if transcript is None else transcript,
             )
             started = time.monotonic()
             report, error = asyncio.run(
@@ -128,15 +145,41 @@ def run_task(
             latency = round(time.monotonic() - started, 3)
         with Session(get_engine(), expire_on_commit=False) as session:
             orders = buyer_orders(session, account["agent_id"])
+    report = report or {}
+    usage = report.get("usage") or {}
     return {
         "task_id": task["id"],
+        "kind": task.get("kind"),
+        "split": task.get("split"),
         "condition": condition,
         "run": run,
         **score(task, orders),
         "latency_s": latency,
-        "cost_usd": float((report or {}).get("cost_usd") or 0),
+        "cost_usd": float(report.get("cost_usd") or 0),
+        # Set when the gateway reported its charge; cost_usd is list price otherwise.
+        "billed_usd": report.get("billed_usd"),
+        "claimed_status": report.get("status"),
+        "tool_calls": report.get("tool_calls"),
+        "tool_errors": report.get("tool_errors") or [],
+        **{
+            column: sum(int(tokens.get(field, 0)) for tokens in usage.values())
+            for field, column in _TOKENS.items()
+        },
         "error": error,
     }
+
+
+async def rule_sellers(base_url: str, seller_keys: dict[str, str]) -> None:
+    """Every catalog seller, run by its rules in data/sellers. Deterministic."""
+    from agents import rule_seller
+
+    rules = rule_seller.all_rules()
+    missing = sorted(set(seller_keys) - set(rules))
+    if missing:
+        raise ValueError(f"no rules in data/sellers for {', '.join(missing)}")
+    await asyncio.gather(
+        *(rule_seller.run(base_url, key, rules[name]) for name, key in seller_keys.items())
+    )
 
 
 async def _drive(
@@ -208,7 +251,9 @@ async def llm_buyer(brief: Brief) -> dict[str, Any]:
 
     task = {**brief["task"], "condition": brief["condition"], "mandate": brief["mandate"]}
     # llm_agent connects to {root}/mcp/{role}/ itself, so it takes the server root.
-    return await llm_agent.run(brief["base_url"], brief["api_key"], "buyer", task)
+    return await llm_agent.run(
+        brief["base_url"], brief["api_key"], "buyer", task, transcript=brief["transcript"]
+    )
 
 
 async def llm_sellers(base_url: str, seller_keys: dict[str, str]) -> None:
@@ -227,14 +272,20 @@ def _load(spec: str) -> Callable[..., Any]:
     return getattr(importlib.import_module(module), name)
 
 
+def transcript_path(out: Path) -> Path:
+    """results.jsonl -> results.transcripts.jsonl"""
+    return out.with_suffix(".transcripts.jsonl")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="eval.run")
     parser.add_argument("--tasks", default="all", help="comma-separated ids, or all")
+    parser.add_argument("--split", choices=("all", *SPLITS), default="all")
     parser.add_argument("--conditions", default="A,B")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--out", type=Path, default=Path("results.jsonl"))
     parser.add_argument("--buyer", default="eval.run:llm_buyer")
-    parser.add_argument("--sellers", default="eval.run:llm_sellers")
+    parser.add_argument("--sellers", default="eval.run:rule_sellers")
     parser.add_argument("--timeout", type=float, default=600)
     args = parser.parse_args(argv)
 
@@ -242,17 +293,29 @@ def main(argv: list[str] | None = None) -> None:
     if args.tasks != "all":
         wanted = set(args.tasks.split(","))
         tasks = [task for task in tasks if task["id"] in wanted]
+    if args.split != "all":
+        tasks = [task for task in tasks if task.get("split") == args.split]
     conditions = args.conditions.split(",")
     buyer, sellers = _load(args.buyer), _load(args.sellers)
-    with args.out.open("a") as out:
+    with args.out.open("a") as out, transcript_path(args.out).open("a") as transcripts:
         for task in tasks:
             for condition in conditions:
                 for run in range(1, args.runs + 1):
+                    turns: list[dict[str, Any]] = []
                     row = run_task(
-                        task, condition, run, buyer=buyer, sellers=sellers, timeout_s=args.timeout
+                        task,
+                        condition,
+                        run,
+                        buyer=buyer,
+                        sellers=sellers,
+                        timeout_s=args.timeout,
+                        transcript=turns,
                     )
                     out.write(json.dumps(row) + "\n")
                     out.flush()
+                    line = {"task_id": task["id"], "condition": condition, "run": run}
+                    transcripts.write(json.dumps({**line, "turns": turns}, default=str) + "\n")
+                    transcripts.flush()
                     print(task["id"], condition, run, row["order_total"], row["violations"])
 
 
