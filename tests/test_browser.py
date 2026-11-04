@@ -257,3 +257,26 @@ def test_the_agents_anthropic_client_is_closed(server, session, monkeypatch) -> 
     task = {"id": "close-1", "spec": SPEC, "condition": "A"}
     result = asyncio.run(llm_agent.run(server, key, "buyer", task))
     assert result["status"] == "gave_up" and owned.closed
+
+
+def test_forms_from_earlier_pages_can_still_be_submitted(server, session) -> None:  # noqa: F811
+    from agents.browser import StorefrontBrowser
+
+    market = _market(session)
+    _buyer, key = make_buyer(session, "Tabs")
+    session.commit()
+    first, second = market["cheap_listing"], market["firm_listing"]
+
+    async def scenario() -> tuple[dict, dict, dict]:
+        async with StorefrontBrowser(server, key) as browser:
+            one = await browser.body("open_page", {"path": f"/listing/{first}"})
+            two = await browser.body("open_page", {"path": f"/listing/{second}"})
+            quote = _form(one, "POST", f"/listing/{first}/quote")
+            fields = {key: str(SPEC[key]) for key in ("qty", "ship_to", "need_by")}
+            sent = await browser.body("submit_form", {"form": quote, "fields": fields})
+            return one, two, sent
+
+    one, two, sent = asyncio.run(scenario())
+    # Numbers keep counting across pages, so the second page never reuses the first's.
+    assert _form(two, "POST", f"/listing/{second}/quote") > _form(one, "POST", "/quote")
+    assert "error" not in sent and "/threads/" in sent["url"]

@@ -34,9 +34,9 @@ _TOOLS = [
     {
         "name": "submit_form",
         "description": (
-            "Fill in and submit form N of the page you opened last, then read the page "
-            "it leads to. Hidden fields and preset values are sent for you: name only "
-            "the fields you type into."
+            "Fill in and submit form N, from any page you have opened, then read the page "
+            "it leads to. Form numbers are unique across pages. Hidden fields and preset "
+            "values are sent for you: name only the fields you type into."
         ),
         "input_schema": {
             "type": "object",
@@ -88,7 +88,9 @@ class StorefrontBrowser:
         self.autofill = autofill or {}
         self.timeout_s = timeout_s
         self._http: httpx.AsyncClient | None = None
-        self._forms: list[Form] = []
+        # Every form seen this session, as if each page stayed open in its own tab. The
+        # server still checks each submission, so a stale one fails with its own error.
+        self._forms: dict[int, Form] = {}
 
     async def __aenter__(self) -> Self:
         self._http = httpx.AsyncClient(
@@ -129,9 +131,9 @@ class StorefrontBrowser:
     async def _submit(self, arguments: dict[str, Any]) -> dict[str, Any]:
         assert self._http is not None
         number = arguments.get("form")
-        form = next((form for form in self._forms if form.number == number), None)
+        form = self._forms.get(number) if isinstance(number, int) else None
         if form is None:
-            return _error("NOT_FOUND", f"form {number} is not on the page you opened last")
+            return _error("NOT_FOUND", f"form {number} is not on any page you have opened")
         typed = {name: str(value) for name, value in (arguments.get("fields") or {}).items()}
         names = {item.name for item in form.fields}
         unknown = sorted(set(typed) - names)
@@ -145,10 +147,10 @@ class StorefrontBrowser:
         return self._read(await self._http.post(form.action, data=data))
 
     def _read(self, response: httpx.Response) -> dict[str, Any]:
-        page = _Page(response.url.path)
+        page = _Page(response.url.path, first_form=len(self._forms) + 1)
         page.feed(response.text)
         page.close()
-        self._forms = page.forms
+        self._forms.update({form.number: form for form in page.forms})
         body: dict[str, Any] = {
             "url": response.url.raw_path.decode(),
             "status": response.status_code,
@@ -171,9 +173,10 @@ def render(html: str, path: str = "/") -> tuple[str, list[Form]]:
 
 
 class _Page(HTMLParser):
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, first_form: int = 1) -> None:
         super().__init__(convert_charrefs=True)
         self.path = path
+        self.first_form = first_form
         self.forms: list[Form] = []
         self.error_code = ""
         self.error_message = ""
@@ -286,7 +289,7 @@ class _Page(HTMLParser):
     def _open_form(self, attr: dict[str, str]) -> None:
         method = (attr.get("method") or "get").upper()
         action = attr.get("action") or self.path
-        self._form = Form(number=len(self.forms) + 1, method=method, action=action)
+        self._form = Form(number=self.first_form + len(self.forms), method=method, action=action)
         self.forms.append(self._form)
         self._out.append(f"\n[form {self._form.number}: {method} {action}]\n")
 
