@@ -350,6 +350,7 @@ def test_llm_agent_loop_over_mcp_with_a_scripted_model(server, session, tmp_path
     mandate = _mandate(session, buyer)
     session.commit()
     model = _ScriptedModel()
+    transcript: list[dict] = []
 
     async def scenario() -> dict:
         stop = asyncio.Event()
@@ -360,7 +361,9 @@ def test_llm_agent_loop_over_mcp_with_a_scripted_model(server, session, tmp_path
             )
         )
         task = {"id": "llm-1", "spec": SPEC, "mandate": mandate}
-        result = await llm_agent.run(server, key, "buyer", task, messages_api=model)
+        result = await llm_agent.run(
+            server, key, "buyer", task, messages_api=model, transcript=transcript
+        )
         stop.set()
         await seller
         return result
@@ -378,3 +381,18 @@ def test_llm_agent_loop_over_mcp_with_a_scripted_model(server, session, tmp_path
         order = db.get(Order, result["order_id"])
         # The forged mandate the model passed was replaced by the signed one.
         assert order is not None and order.mandate_id == mandate["id"]
+
+    tools = [call["tool"] for turn in transcript for call in turn["calls"]]
+    assert tools == [
+        "search_listings",
+        "request_quote",
+        "wait",
+        "get_thread",
+        "accept_offer",
+        "finish",
+    ]
+    [accept] = transcript[4]["calls"]
+    assert accept["arguments"]["mandate"] == "<redacted>" and accept["error"] is None
+    assert json.loads(accept["result"])["order_id"] == result["order_id"]
+    kept = json.dumps(transcript)
+    assert key not in kept and mandate["signature"] not in kept
