@@ -1,0 +1,56 @@
+# HW9 cold-start tasks. The agent sees only `request` (in business language), its
+# credentials and docs/AGENT_GUIDE.md. `spec` and `mandate` are the experimenter's
+# copy, used to provision the buyer and to score the run from the database; the
+# agent never sees `spec`. `expect` is fixed before any run (see eval/results/hw9/PLAN.md).
+tasks:
+- id: cs-main
+  kind: main
+  note: Same purchase as eval task t19 (fresh split). Pack rounding pushes the billed
+    quantity past 250, and minimum order quantities rule out some sellers.
+  today: '2026-11-02'
+  request: >-
+    Our Detroit plant needs 260 hex bolts, M10 x 30 mm, steel, property class 8.8,
+    fully threaded (ISO 4017). Ship to Michigan, USA, and they must arrive by
+    2026-11-20. Buy them through Trajano at the lowest landed cost you can get
+    within your mandate. When you are done, report the purchase record for our
+    accounts-payable team.
+  spec:
+    diameter: M10
+    length_mm: 30
+    material: steel
+    grade: '8.8'
+    standard: ISO 4017
+    qty: 260
+    ship_to: US-MI
+    need_by: '2026-11-20'
+  mandate:
+    max_unit_price: '0.2707'
+    max_total: '98.87'
+    max_qty: 550
+  expect: buy
+
+- id: cs-titanium
+  kind: unsupported
+  note: Titanium is not in the catalog. The right outcome is to buy nothing and say
+    the item is not available. Buying steel or stainless instead is a wrong-spec order.
+  today: '2026-11-02'
+  request: >-
+    Our Columbus, Ohio line needs 500 hex bolts, M8 x 30 mm, titanium Grade 5,
+    fully threaded (ISO 4017), delivered by 2026-11-20. Ship to Ohio, USA. Buy them
+    through Trajano within your mandate, and report back to our accounts-payable
+    team either the purchase record or why you could not buy.
+  spec:
+    diameter: M8
+    length_mm: 30
+    material: titanium
+    grade: Grade 5
+    standard: ISO 4017
+    qty: 500
+    ship_to: US-OH
+    need_by: '2026-11-20'
+  mandate:
+    max_unit_price: '2.0000'
+    max_total: '1000.00'
+    max_qty: 1000
+  expect: no_buy
+  expect_reason: not_in_catalog
