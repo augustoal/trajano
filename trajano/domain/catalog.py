@@ -17,6 +17,7 @@ from trajano.schemas import (
     PriceableListing,
     PriceTier,
     SearchExclusion,
+    SearchHint,
     SearchHit,
     SearchPage,
     SearchSpec,
@@ -87,12 +88,13 @@ def search(session: Session, spec: SearchSpec) -> SearchPage:
         landed = pricing.landed_cost(as_priceable(listing), spec.qty, spec.ship_to)
         priced.append((landed.total, listing.id or 0, listing, landed))
 
+    hints = no_match_hints(session, spec) if not priced and not excluded else []
     priced.sort(key=lambda row: (row[0], row[1]))
     hits = [
         SearchHit(listing=get_listing(session, listing_id), landed=landed, rank=rank)
         for rank, (_total, listing_id, _listing, landed) in enumerate(priced, start=1)
     ]
-    return SearchPage(hits=hits, excluded=excluded)
+    return SearchPage(hits=hits, excluded=excluded, hints=hints)
 
 
 def get_listing(session: Session, listing_id: int) -> ListingPublic:
@@ -309,3 +311,44 @@ def _tiers(raw: list[dict]) -> list[PriceTier]:
     ]
     tiers.sort(key=lambda tier: tier.min_qty)
     return tiers
+
+
+def no_match_hints(session: Session, spec: SearchSpec) -> list[SearchHint]:
+    """Explain an empty search: which exact filter value no current listing has.
+
+    Filters match exactly, so "Stainless" or "titanium" silently matched nothing.
+    An agent could not tell a product the catalog does not carry from a typo, and
+    retried blindly. Matching itself is unchanged; this only explains it.
+    """
+    hints: list[SearchHint] = []
+    for name in _EXACT:
+        wanted = getattr(spec, name)
+        if wanted is None:
+            continue
+        column = getattr(Listing, name)
+        known = sorted(
+            {str(value) for value in session.exec(
+                select(column).where(Listing.is_current == True)  # noqa: E712
+            ).all()}
+        )  # fmt: skip
+        if wanted not in known:
+            hints.append(
+                SearchHint(
+                    field=name,
+                    value=wanted,
+                    message=f"no current listing has {name} {wanted!r}; filters match exactly",
+                    known_values=known,
+                )
+            )
+    if not hints:
+        hints.append(
+            SearchHint(
+                field="spec",
+                value="",
+                message=(
+                    "each filter value exists in the catalog, but no current listing has "
+                    "this combination within length_tolerance_mm of length_mm"
+                ),
+            )
+        )
+    return hints

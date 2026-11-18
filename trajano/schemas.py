@@ -290,6 +290,15 @@ class SearchExclusion(APIModel):
     detail: str
 
 
+class SearchHint(APIModel):
+    """Why a search matched nothing, so an agent can tell "not carried" from a typo."""
+
+    field: str
+    value: str
+    message: str
+    known_values: list[str] = []
+
+
 class SearchHit(APIModel):
     listing: ListingPublic
     landed: Breakdown
@@ -299,6 +308,7 @@ class SearchHit(APIModel):
 class SearchPage(APIModel):
     hits: list[SearchHit]
     excluded: list[SearchExclusion]
+    hints: list[SearchHint] = []
 
 
 class QuestionPayload(InputModel):
@@ -584,6 +594,7 @@ class GetListingResult(ToolResult):
 class SearchToolResult(ToolResult):
     hits: list[SearchHit] = []
     excluded: list[SearchExclusion] = []
+    hints: list[SearchHint] = []
 
 
 class SendToolResult(ToolResult):

@@ -67,7 +67,10 @@ database records them. All data is synthetic and the clock is frozen at the task
 
 ## 3. Values and formats
 
-Search filters are **matched exactly**, including case and spaces.
+Search filters are **matched exactly**, including case and spaces. When nothing
+matches, the result's `hints` say which value the catalog does not have and list
+the values it does (`known_values`), so you can tell an item that is not sold from
+a typo.
 
 | Field | Format | Examples in the current catalog |
 |---|---|---|
@@ -92,7 +95,7 @@ the same key and the same arguments returns the first result instead of acting t
 
 | Tool | Required inputs | Returns |
 |---|---|---|
-| `search_listings` | `ship_to`, `need_by`, `qty`, `length_mm`; optional `diameter`, `material`, `grade`, `standard`, `length_tolerance_mm` | `hits` (each: `listing`, `landed` cost breakdown, `rank`) and `excluded` (each: `listing_id`, `reason`, `detail`) |
+| `search_listings` | `ship_to`, `need_by`, `qty`, `length_mm`; optional `diameter`, `material`, `grade`, `standard`, `length_tolerance_mm` | `hits` (each: `listing`, `landed` cost breakdown, `rank`) and `excluded` (each: `listing_id`, `reason`, `detail`); when both are empty, `hints` (each: `field`, `value`, `message`, `known_values`) |
 | `get_listing` | `listing_id` | `listing`: specs, price tiers, `moq`, `pack_size`, `stock`, `lead_time_days`, `ships_from`, `seller_notes` |
 | `ask_question` | `listing_id`, `text`, `idempotency_key` | `thread_id`, `status`, `next_actions` |
 | `request_quote` | `listing_id`, `qty`, `ship_to`, `need_by`, `idempotency_key` | `thread_id`, `status: QUOTE_REQUESTED` |

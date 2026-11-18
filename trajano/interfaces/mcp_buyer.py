@@ -53,7 +53,9 @@ def build_buyer_mcp() -> FastMCP:
 
     @mcp.tool(
         description=(
-            "Search current fastener listings. length_mm, ship_to, need_by, and qty are required."
+            "Search current fastener listings. length_mm, ship_to, need_by, and qty are required. "
+            "Filters match exactly; if nothing matches, hints name the value the "
+            "catalog does not have and list the values it does."
         )
     )
     def search_listings(
@@ -82,7 +84,7 @@ def build_buyer_mcp() -> FastMCP:
                 qty=qty,
             )
             page = catalog.search(session, spec)
-            return SearchToolResult(hits=page.hits, excluded=page.excluded)
+            return SearchToolResult(hits=page.hits, excluded=page.excluded, hints=page.hints)
 
         return buyer_call(SearchToolResult, work)
 
